@@ -242,8 +242,8 @@ class HltvPlugin(Star):
                         m.get("id"), m.get("url", "")
                     )
                     m.update(self.client.summarize_map_scores(maps))
-                except HltvError:
-                    pass
+                except HltvError as e:
+                    logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
             if mine:
                 yield event.plain_result(formatter.format_live(mine))
             else:
@@ -272,7 +272,8 @@ class HltvPlugin(Star):
         for m in data[:4]:
             try:
                 maps = await self.client.get_live_score(m.get("id"), m.get("url", ""))
-            except HltvError:
+            except HltvError as e:
+                logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
                 continue
             m.update(self.client.summarize_map_scores(maps))
         yield event.plain_result(formatter.format_live(data, note, delayed))

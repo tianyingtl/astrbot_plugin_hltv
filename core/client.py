@@ -471,25 +471,32 @@ class HltvClient:
 
     @staticmethod
     def summarize_map_scores(maps: list[dict]) -> dict:
-        """地图比分 → {'maps_score': '1:0', 'current_map': 'Ancient 4:8'}。
-        完赛判定：一方 ≥13 分且分差非零（含加时近似）。"""
+        """地图比分 → {'maps_score': '1:0', 'current_map': '当前 Ancient 4:8'}。
+        完赛判定：一方 ≥13 分且分差非零（含加时近似）。
+
+        对局初期详情页比分全是 '-'（服务器尚未同步），此时给出明确提示，
+        避免用户以为比分功能坏了。"""
         won1 = won2 = 0
         current = ""
+        has_digit = False
         for m in maps:
             s1, s2 = str(m.get("s1", "")), str(m.get("s2", ""))
             if not s1.isdigit() or not s2.isdigit():
                 continue
+            has_digit = True
             a, b = int(s1), int(s2)
             if max(a, b) >= 13 and a != b:
                 won1 += a > b
                 won2 += b > a
             else:
-                current = f"{m.get('map', '?')} {a}:{b}"
+                current = f"当前 {m.get('map', '?')} {a}:{b}"
         out: dict[str, Any] = {}
-        if won1 or won2 or current:
+        if has_digit:
             out["maps_score"] = f"{won1}:{won2}"
-        if current:
-            out["current_map"] = current
+            if current:
+                out["current_map"] = current
+        elif maps:
+            out["current_map"] = "比分暂未同步"
         return out
 
     async def get_live_score(self, match_id: Any, url: str) -> list[dict]:

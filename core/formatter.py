@@ -140,7 +140,7 @@ def format_live(
             line = f"· {m.get('team1') or '?'}{mid}{m.get('team2') or '?'}  {stars}".rstrip()
             event = str(m.get("event", "")).strip()
             cur = str(m.get("current_map", "")).strip()
-            detail = f"{event}（当前 {cur}）" if event and cur else (event or (f"当前 {cur}" if cur else ""))
+            detail = f"{event}（{cur}）" if event and cur else (event or cur)
             lines.append(f"{line}\n  {detail}" if detail else line)
     if delayed:
         lines.append("⏳ 已过开赛时间（延迟或刚开打，暂无直播数据）")
