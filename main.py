@@ -9,6 +9,7 @@
 
 import asyncio
 import difflib
+import re
 from datetime import timedelta
 
 from astrbot.api import AstrBotConfig, logger
@@ -108,6 +109,22 @@ class HltvPlugin(Star):
                 return rest or fallback
         return fallback
 
+    @staticmethod
+    def _team_query_match(query: str, m: dict) -> bool:
+        """队名模糊匹配：规范化(去空格/符号、小写)后做双向子串，
+        让 100t 能命中 "100 Thieves"、mongolz 能命中 "The MongolZ"。"""
+        def norm(s):
+            return re.sub(r"[^0-9a-z一-鿿]", "", str(s).lower())
+
+        q = norm(query)
+        if not q:
+            return False
+        for t in (m.get("team1", ""), m.get("team2", "")):
+            tn = norm(t)
+            if tn and (q in tn or tn in q):
+                return True
+        return False
+
     def _filter_by_event(self, matches: list[dict]) -> list[dict]:
         if not self.event_keywords:
             return matches
@@ -191,10 +208,47 @@ class HltvPlugin(Star):
         )
 
     @hltv.command("live", alias={"直播"})
-    async def live(self, event: AstrMessageEvent):
-        """正在进行的比赛（默认只看大赛，带比分）"""
+    async def live(self, event: AstrMessageEvent, name: str = ""):
+        """正在进行的比赛（默认只看大赛，带比分）；可带队名只看该队"""
+        name = self._rest_after(event, {"live", "直播"}, name)
         if tip := self._waiting_tip(event, MATCHES_RAW_KEY):
             yield tip
+        if name:
+            # 指定战队：不做星级/关键词过滤——用户点名要看的队就该给结果
+            try:
+                mine = [
+                    m
+                    for m in await self.client.get_live_matches()
+                    if self._team_query_match(name, m)
+                ]
+                upcoming = None
+                if not mine:
+                    upcoming = next(
+                        (
+                            m
+                            for m in await self.client.get_matches(days=1)
+                            if self._team_query_match(name, m)
+                        ),
+                        None,
+                    )
+            except HltvError as e:
+                yield event.plain_result(str(e))
+                return
+            for m in mine[:2]:
+                try:
+                    maps = await self.client.get_live_score(
+                        m.get("id"), m.get("url", "")
+                    )
+                    m.update(self.client.summarize_map_scores(maps))
+                except HltvError:
+                    pass
+            if mine:
+                yield event.plain_result(formatter.format_live(mine))
+            else:
+                yield event.plain_result(
+                    formatter.format_team_not_live(name, upcoming)
+                )
+            return
         try:
             data = self._filter_by_event(
                 await self.client.get_live_matches(min_stars=self.min_stars)

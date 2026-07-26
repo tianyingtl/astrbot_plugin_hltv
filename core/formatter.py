@@ -149,6 +149,18 @@ def format_live(
     return "\n".join(lines)
 
 
+def format_team_not_live(name: str, upcoming: dict | None) -> str:
+    """/hltv live <队名>：该队不在直播中时的答复。"""
+    if upcoming is None:
+        return f"「{name}」当前没有正在进行的比赛，未来 24 小时也没有已安排的场次。"
+    when = (
+        "已过预定开赛时间，可能延迟或即将开打"
+        if upcoming.get("late")
+        else f"{upcoming.get('date', '?')} {upcoming.get('time', '?')} 开赛"
+    )
+    return f"「{name}」暂未开打（{when}）：\n{_match_line(upcoming)}"
+
+
 # ---------------------------------------------------------------- 赛果/排名/赛事
 
 
@@ -300,7 +312,7 @@ def format_news_detail(title: str, paragraphs: list[str], url: str) -> str:
 HELP_TEXT = """🎮 HLTV 查询插件
 /hltv today — 今日赛程（大赛）
 /hltv matches [天数] — 近期大赛
-/hltv live — 正在进行的比赛（默认只看大赛）
+/hltv live [队名] — 正在进行的比赛（默认只看大赛，带队名只看该队）
 /hltv results [天数] — 近期赛果
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名
