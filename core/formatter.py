@@ -52,7 +52,9 @@ def _match_sort_key(m: dict) -> tuple:
 def _match_line(m: dict) -> str:
     stars = "★" * int(m.get("rating") or 0)
     time_ = str(m.get("time", ""))
-    when = f"[{time_}] " if time_ and time_ != "LIVE" else ""
+    # late = 已过预定开赛时间但未标记 live（延迟或刚开打）
+    late = "⏳" if m.get("late") else ""
+    when = f"[{time_}{late}] " if time_ and time_ != "LIVE" else ""
     line = f"· {when}{m.get('team1') or 'TBD'} vs {m.get('team2') or 'TBD'}  {stars}".rstrip()
     event = str(m.get("event", "")).strip()
     return f"{line}\n  {event}" if event else line
@@ -121,15 +123,29 @@ def format_today(
     )
 
 
-def format_live(matches: list[dict]) -> str:
-    if not matches:
+def format_live(
+    matches: list[dict], note: str = "", delayed: list[dict] | None = None
+) -> str:
+    if not matches and not delayed:
         return "🔴 当前没有正在进行的比赛。"
-    lines = ["🔴 正在进行的比赛"]
-    for m in matches:
-        stars = "★" * int(m.get("rating") or 0)
-        line = f"· {m.get('team1') or '?'} vs {m.get('team2') or '?'}  {stars}".rstrip()
-        event = str(m.get("event", "")).strip()
-        lines.append(f"{line}\n  {event}" if event else line)
+    lines = []
+    if matches:
+        lines.append("🔴 正在进行的比赛")
+        if note:
+            lines.append(note)
+        for m in matches:
+            stars = "★" * int(m.get("rating") or 0)
+            score = str(m.get("maps_score", "")).strip()
+            mid = f" {score} " if score else " vs "
+            line = f"· {m.get('team1') or '?'}{mid}{m.get('team2') or '?'}  {stars}".rstrip()
+            event = str(m.get("event", "")).strip()
+            cur = str(m.get("current_map", "")).strip()
+            detail = f"{event}（当前 {cur}）" if event and cur else (event or (f"当前 {cur}" if cur else ""))
+            lines.append(f"{line}\n  {detail}" if detail else line)
+    if delayed:
+        lines.append("⏳ 已过开赛时间（延迟或刚开打，暂无直播数据）")
+        for m in delayed[:5]:
+            lines.append(_match_line(m))
     return "\n".join(lines)
 
 
@@ -284,7 +300,7 @@ def format_news_detail(title: str, paragraphs: list[str], url: str) -> str:
 HELP_TEXT = """🎮 HLTV 查询插件
 /hltv today — 今日赛程（大赛）
 /hltv matches [天数] — 近期大赛
-/hltv live — 正在进行的比赛
+/hltv live — 正在进行的比赛（默认只看大赛）
 /hltv results [天数] — 近期赛果
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名

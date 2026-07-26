@@ -8,7 +8,7 @@ AstrBot 插件：在聊天里查询 [HLTV](https://www.hltv.org/)（CS2 赛事�
 | --- | --- |
 | `/hltv today` | 今日赛程（直播中优先；过滤后为空时自动回退显示全部） |
 | `/hltv matches [天数]` | 近期大赛（默认 1 天，上限 7 天；星级门槛见配置） |
-| `/hltv live` | 正在进行的比赛 |
+| `/hltv live` | 正在进行的比赛（默认只看大赛，带地图/当前局比分，延迟场次单列） |
 | `/hltv results [天数]` | 近期赛果（不做星级过滤） |
 | `/hltv ranking` | **Valve VRS 排名**（默认全球，V社积分） |
 | `/hltv ranking asia\|europe\|americas` | 地区 VRS 排名（可用中文：亚洲/欧洲/美洲） |

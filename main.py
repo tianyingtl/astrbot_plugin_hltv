@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import difflib
 from datetime import timedelta
 
 from astrbot.api import AstrBotConfig, logger
@@ -29,6 +30,23 @@ from .core.client import (
 from .core.translator import Translator
 
 _REGION_CN = {"Asia": "亚洲", "Europe": "欧洲", "Americas": "美洲"}
+
+# 全部子指令名与别名。新增子指令时同步维护，
+# 用于拼错提示（未匹配到任何子指令时框架会静默，体验极差）
+_KNOWN_SUBCOMMANDS = {
+    "help", "帮助",
+    "today", "今日", "今天", "今日赛程",
+    "matches", "比赛", "大赛",
+    "live", "直播",
+    "results", "赛果", "结果",
+    "ranking", "排名", "排行",
+    "events", "赛事",
+    "team", "战队",
+    "player", "选手",
+    "news", "新闻",
+    "sub", "订阅",
+    "unsub", "退订", "取消订阅",
+}
 
 
 class HltvPlugin(Star):
@@ -174,15 +192,34 @@ class HltvPlugin(Star):
 
     @hltv.command("live", alias={"直播"})
     async def live(self, event: AstrMessageEvent):
-        """正在进行的比赛"""
+        """正在进行的比赛（默认只看大赛，带比分）"""
         if tip := self._waiting_tip(event, MATCHES_RAW_KEY):
             yield tip
         try:
-            data = await self.client.get_live_matches()
+            data = self._filter_by_event(
+                await self.client.get_live_matches(min_stars=self.min_stars)
+            )
+            note = ""
+            if not data and (self.min_stars > 0 or self.event_keywords):
+                alt = await self.client.get_live_matches()
+                if alt:
+                    data, note = alt, "（当前无大赛直播，已显示全部场次）"
+            # 延迟场次：过了开赛时间但 HLTV 还没标 live 的比赛,
+            # 不显示会让用户以为比赛消失了
+            delayed = self._filter_by_event(
+                await self.client.get_delayed_matches(min_stars=self.min_stars)
+            )
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(formatter.format_live(data))
+        # 比分在单场详情页,逐场抓取代价高,只取前几场
+        for m in data[:4]:
+            try:
+                maps = await self.client.get_live_score(m.get("id"), m.get("url", ""))
+            except HltvError:
+                continue
+            m.update(self.client.summarize_map_scores(maps))
+        yield event.plain_result(formatter.format_live(data, note, delayed))
 
     @hltv.command("results", alias={"赛果", "结果"})
     async def results(self, event: AstrMessageEvent, days: int = 0):
@@ -325,6 +362,31 @@ class HltvPlugin(Star):
                 for it, zh in zip(pending, translated):
                     it["title_zh"] = zh
         yield event.plain_result(formatter.format_news(items, self.max_items))
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def unknown_subcommand_hint(self, event: AstrMessageEvent):
+        """拼错子指令时给出纠错提示（如 hltv new → news）。
+
+        框架对"组名对、子指令不认识"的消息不派发任何 handler，
+        用户只会看到沉默；这里兜底。合法子指令会被前面的 return 跳过，
+        不会造成重复回复。"""
+        if not getattr(event, "is_at_or_wake_command", False):
+            return
+        tokens = (event.message_str or "").strip().split()
+        if len(tokens) < 2 or tokens[0].lower() != "hltv":
+            return  # 非本插件消息；裸 /hltv 由框架自动回复指令树
+        if tokens[1].lower() in _KNOWN_SUBCOMMANDS:
+            return
+        typo = tokens[1]
+        close = difflib.get_close_matches(
+            typo.lower(), _KNOWN_SUBCOMMANDS, n=1, cutoff=0.5
+        )
+        hint = (
+            f"，你是想输入 /hltv {close[0]} 吗？"
+            if close
+            else "。发送 /hltv help 查看全部指令。"
+        )
+        yield event.plain_result(f"❓ 未知子指令「{typo}」{hint}")
 
     # ---------------------------------------------------------------- 订阅推送
 

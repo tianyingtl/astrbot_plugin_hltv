@@ -345,8 +345,13 @@ class HltvClient:
                     unix = int(tdiv["data-unix"]) / 1000.0
                 except (ValueError, TypeError):
                     unix = None
-            # 注意：直播比分 span 在服务器端 HTML 里是空的（由 scorebot
-            # websocket 在浏览器里填充），爬虫拿不到，故不解析比分
+            url = ""
+            link = w.find("a", href=lambda h: h and h.startswith("/matches/"))
+            if link is not None:
+                url = f"https://www.hltv.org{link['href']}"
+            # 注意：列表页的直播比分 span 在服务器端 HTML 里是空的（由
+            # scorebot websocket 填充），比分要到单场详情页取（见
+            # get_live_score）
             entry = {
                 "id": mid,
                 "live": str(w.get("live")) == "true",
@@ -355,6 +360,7 @@ class HltvClient:
                 "team2": names[1] if len(names) > 1 else "",
                 "event": event,
                 "unix": unix,
+                "url": url,
             }
             # 同一比赛会在"置顶/为你推荐"区和正文各出现一次，且置顶卡片
             # 往往缺赛事名等字段：去重时用后出现的条目回填缺失字段
@@ -382,11 +388,14 @@ class HltvClient:
         窗口按**滚动 N×24 小时**算而非日历日：CS 的欧洲赛事在北京时间
         普遍零点后开打，23:50 查"今日赛程"时用户要的是接下来这一晚，
         按日历日切会在午夜前后给出违反直觉的空/满结果。
+
+        已过预定开赛时间但仍挂在 upcoming 列表的比赛（延迟开赛很常见，
+        HLTV 也可能尚未标记 live）**保留**并打 late 标记——打完的比赛
+        会从列表页消失，还挂着就说明没结束，丢掉会让比赛凭空蒸发。
         """
         now = self._now_local()
         now_ts = now.timestamp()
         horizon = now_ts + max(days, 1) * 86400
-        grace = 900  # 刚开赛但页面尚未标记 live 的缓冲
         out = []
         for m in raw:
             if m.get("rating", 0) < min_stars:
@@ -398,11 +407,16 @@ class HltvClient:
                 continue
             if m.get("unix") is None:
                 continue
-            if m["unix"] < now_ts - grace or m["unix"] > horizon:
+            if m["unix"] > horizon:
                 continue
             dt = datetime.fromtimestamp(m["unix"], now.tzinfo)
             out.append(
-                {**m, "date": dt.strftime(_DATE_FMT), "time": dt.strftime("%H:%M")}
+                {
+                    **m,
+                    "date": dt.strftime(_DATE_FMT),
+                    "time": dt.strftime("%H:%M"),
+                    "late": m["unix"] < now_ts,
+                }
             )
         return out
 
@@ -414,9 +428,81 @@ class HltvClient:
         """今日赛程：直播中的 + 未来 24 小时开赛的（按配置时区显示）。"""
         return await self.get_matches(days=1, min_stars=min_stars)
 
-    async def get_live_matches(self) -> list[dict]:
+    async def get_live_matches(self, min_stars: int = 0) -> list[dict]:
         raw = await self._get_matches_raw()
-        return [{**m, "date": LIVE, "time": LIVE} for m in raw if m.get("live")]
+        return [
+            {**m, "date": LIVE, "time": LIVE}
+            for m in raw
+            if m.get("live") and m.get("rating", 0) >= min_stars
+        ]
+
+    async def get_delayed_matches(self, min_stars: int = 0) -> list[dict]:
+        """已过预定开赛时间但 HLTV 尚未标记 live 的比赛（延迟或刚开打）。"""
+        return [
+            m
+            for m in self._matches_view(
+                await self._get_matches_raw(), days=1, min_stars=min_stars
+            )
+            if m.get("late")
+        ]
+
+    # ------------------------------------------------------------ 直播比分
+
+    @staticmethod
+    def _parse_match_maps(page: Any) -> list[dict]:
+        """单场详情页的地图比分（服务器渲染，列表页拿不到）。
+        每项 {'map','s1','s2'}，未开地图的比分是 '-'。"""
+        maps = []
+        for holder in page.find_all("div", class_="mapholder"):
+            name_el = holder.find(class_="mapname")
+            scores = [
+                e.get_text(strip=True)
+                for e in holder.find_all(class_="results-team-score")
+            ]
+            if len(scores) >= 2:
+                maps.append(
+                    {
+                        "map": name_el.get_text(strip=True) if name_el else "?",
+                        "s1": scores[0],
+                        "s2": scores[1],
+                    }
+                )
+        return maps
+
+    @staticmethod
+    def summarize_map_scores(maps: list[dict]) -> dict:
+        """地图比分 → {'maps_score': '1:0', 'current_map': 'Ancient 4:8'}。
+        完赛判定：一方 ≥13 分且分差非零（含加时近似）。"""
+        won1 = won2 = 0
+        current = ""
+        for m in maps:
+            s1, s2 = str(m.get("s1", "")), str(m.get("s2", ""))
+            if not s1.isdigit() or not s2.isdigit():
+                continue
+            a, b = int(s1), int(s2)
+            if max(a, b) >= 13 and a != b:
+                won1 += a > b
+                won2 += b > a
+            else:
+                current = f"{m.get('map', '?')} {a}:{b}"
+        out: dict[str, Any] = {}
+        if won1 or won2 or current:
+            out["maps_score"] = f"{won1}:{won2}"
+        if current:
+            out["current_map"] = current
+        return out
+
+    async def get_live_score(self, match_id: Any, url: str) -> list[dict]:
+        """抓单场详情页取地图比分。走缓存（≤_LIVE_TTL）避免刷屏打详情页。"""
+        if not url:
+            raise HltvError("该比赛没有详情页链接。")
+
+        async def fetch() -> list[dict]:
+            page = await self._fetch_raw(url)
+            return self._parse_match_maps(page)
+
+        ttl = min(float(self._cache_ttl or _LIVE_TTL), _LIVE_TTL)
+        return await self._cached_locked(f"live_score:{match_id}", fetch, ttl=ttl)
 
     # ---------------------------------------------------------------- 排名
 
