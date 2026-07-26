@@ -2,13 +2,34 @@
   "min_stars": {
     "description": "比赛星级门槛（0-5），matches/today 只显示不低于该星级的大赛",
     "type": "int",
-    "hint": "HLTV 用 0-5 星标注比赛重要程度。默认 1 = 过滤掉 0 星小比赛；调成 0 显示全部，2-3 只看顶级对局。",
+    "hint": "HLTV 用 0-5 星标注比赛重要程度。默认 1 = 过滤掉 0 星小比赛；调成 0 显示全部。过滤后为空时会自动回退显示全部场次。",
     "default": 1
   },
   "event_keywords": {
     "description": "大赛关键词白名单（可选），只显示赛事名含这些关键词的比赛",
     "type": "list",
     "hint": "例如 Major、IEM、BLAST、ESL、PGL。留空则不启用，仅按星级过滤。对 matches / today 生效。",
+    "default": []
+  },
+  "translate_news": {
+    "description": "将新闻标题和详情翻译成中文（微软翻译免费接口）",
+    "type": "bool",
+    "default": true
+  },
+  "enable_push": {
+    "description": "开启每日定时推送今日赛程",
+    "type": "bool",
+    "hint": "开启后按 push_time 推送到已订阅会话（在目标群/私聊里发 /hltv sub 订阅）。修改后需重载插件生效。",
+    "default": false
+  },
+  "push_time": {
+    "description": "每日推送时间（24 小时制 HH:MM，按 timezone 时区）",
+    "type": "string",
+    "default": "09:00"
+  },
+  "push_sessions": {
+    "description": "订阅推送的会话列表（一般用 /hltv sub 自动登记，无需手填）",
+    "type": "list",
     "default": []
   },
   "default_days": {
@@ -24,11 +45,11 @@
   "send_waiting_tip": {
     "description": "查询前先发送一条“正在查询”的提示",
     "type": "bool",
-    "hint": "HLTV 爬取较慢（数秒到数十秒），开启后体验更好，但群里消息会多一条。",
+    "hint": "HLTV 爬取较慢（数秒到数十秒），开启后体验更好，但群里消息会多一条。结果已有缓存时不会发。",
     "default": false
   },
   "timezone": {
-    "description": "比赛时间显示时区（today 的“今天”也按此判定）",
+    "description": "比赛时间显示时区（today 的“今天”与推送时间也按此判定）",
     "type": "string",
     "default": "Asia/Shanghai"
   },
@@ -51,7 +72,7 @@
   "cache_ttl": {
     "description": "查询结果缓存时间（秒）",
     "type": "int",
-    "hint": "同一查询在缓存期内直接返回上次结果，不再请求 HLTV，可显著降低被风控的概率。设为 0 关闭缓存。",
+    "hint": "同一查询在缓存期内直接返回上次结果，降低被风控概率。比赛列表单独限制在 60 秒内以保证直播状态时效。设为 0 关闭缓存。",
     "default": 300
   }
 }

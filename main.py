@@ -1,25 +1,34 @@
 """astrbot_plugin_hltv — HLTV 查询插件入口。
 
 分层：
-    main.py            指令注册与参数解析（本文件）
-    core/client.py     HLTV 数据访问（缓存、限流、异常归一化）
-    core/formatter.py  数据 → 文本消息
+    main.py             指令注册、参数解析、翻译/推送编排（本文件）
+    core/client.py      HLTV 数据访问（缓存、限流、自建解析器）
+    core/formatter.py   数据 → 文本消息
+    core/translator.py  微软翻译（免费 Edge 通道）
 """
 
+import asyncio
+from datetime import timedelta
+
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 
+from .core import formatter
 from .core.client import (
     EVENTS_KEY,
+    MATCHES_RAW_KEY,
     NEWS_KEY,
-    RANKING_KEY,
+    RANKING_HLTV_KEY,
+    VRS_REGIONS,
     HltvClient,
     HltvError,
-    matches_key,
     results_key,
+    vrs_key,
 )
-from .core import formatter
+from .core.translator import Translator
+
+_REGION_CN = {"Asia": "亚洲", "Europe": "欧洲", "Americas": "美洲"}
 
 
 class HltvPlugin(Star):
@@ -31,10 +40,19 @@ class HltvPlugin(Star):
         self.min_stars = max(0, min(int(config.get("min_stars", 1)), 5))
         # 大赛关键词白名单（空 = 不启用），对 matches / today 生效
         self.event_keywords = [
-            str(k).strip().lower() for k in (config.get("event_keywords") or []) if str(k).strip()
+            str(k).strip().lower()
+            for k in (config.get("event_keywords") or [])
+            if str(k).strip()
         ]
         self.default_days = max(1, min(int(config.get("default_days", 1)), 7))
         self.send_waiting_tip = bool(config.get("send_waiting_tip", False))
+        self.translate_news = bool(config.get("translate_news", True))
+        self.enable_push = bool(config.get("enable_push", False))
+        self._push_hm = self._parse_push_time(str(config.get("push_time", "09:00")))
+        # 展示用的时间取解析结果，配置串无效回退 09:00 时不给用户看原始串
+        self.push_time = "{:02d}:{:02d}".format(*self._push_hm)
+        self._push_task: asyncio.Task | None = None
+
         self.client = HltvClient(
             proxy_list=[p for p in (config.get("proxy_list") or []) if p],
             timeout=int(config.get("timeout", 15)),
@@ -42,16 +60,28 @@ class HltvPlugin(Star):
             tz=str(config.get("timezone", "Asia/Shanghai")),
             cache_ttl=int(config.get("cache_ttl", 300)),
         )
+        self.translator = Translator()
 
-    # ------------------------------------------------------------------ 指令组
+    # ------------------------------------------------------------------ 工具
+
+    @staticmethod
+    def _parse_push_time(s: str) -> tuple[int, int]:
+        try:
+            h, m = str(s).strip().split(":")
+            h, m = int(h), int(m)
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h, m
+        except (ValueError, AttributeError):
+            pass
+        logger.warning(f"[hltv] push_time {s!r} 格式无效（应为 HH:MM），已回退 09:00")
+        return 9, 0
 
     @staticmethod
     def _rest_after(event: AstrMessageEvent, subcmds: set[str], fallback: str) -> str:
         """取消息中子指令（含别名）之后的整段文本。
 
-        AstrBot 的 str 指令参数按空格只绑定一个词，"/hltv team natus vincere"
-        只会绑到 "natus"；这里从原始消息里把子指令后面的部分整体取出，
-        让含空格的战队名/选手名也能查。
+        AstrBot 的 str 指令参数按空格只绑定一个词，这里从原始消息里把
+        子指令后面的部分整体取出，让含空格的战队名/选手名也能查。
         """
         tokens = (event.message_str or "").split()
         for i, tok in enumerate(tokens):
@@ -61,7 +91,6 @@ class HltvPlugin(Star):
         return fallback
 
     def _filter_by_event(self, matches: list[dict]) -> list[dict]:
-        """按配置的大赛关键词白名单过滤（未配置时原样返回）。"""
         if not self.event_keywords:
             return matches
         return [
@@ -71,15 +100,27 @@ class HltvPlugin(Star):
         ]
 
     def _waiting_tip(self, event: AstrMessageEvent, cache_key: str | None = None):
-        """查询前的等待提示（可在 WebUI 配置中开关）。
-
-        结果已有缓存时秒回，不发提示，免得群里连刷两条。
-        """
+        """查询前的等待提示；结果已有缓存（秒回）时不发，免得连刷两条。"""
         if not self.send_waiting_tip:
             return None
         if cache_key is not None and self.client.is_fresh(cache_key):
             return None
         return event.plain_result("🔎 正在查询 HLTV，稍等…")
+
+    async def _fetch_today_view(self) -> tuple[list[dict], str]:
+        """今日赛程 + 空结果自动回退：配置了星级/关键词过滤但过滤后为空时，
+        改用不过滤的全量再展示一次，并附说明，而不是只回一句"没有比赛"。"""
+        data = self._filter_by_event(
+            await self.client.get_today_matches(min_stars=self.min_stars)
+        )
+        note = ""
+        if not data and (self.min_stars > 0 or self.event_keywords):
+            alt = await self.client.get_today_matches(min_stars=0)
+            if alt:
+                data, note = alt, "（今日无符合大赛条件的比赛，已显示全部场次）"
+        return data, note
+
+    # ------------------------------------------------------------------ 指令组
 
     @filter.command_group("hltv")
     def hltv(self):
@@ -93,17 +134,16 @@ class HltvPlugin(Star):
     @hltv.command("today", alias={"今日", "今天", "今日赛程"})
     async def today(self, event: AstrMessageEvent):
         """今日赛程（直播优先）"""
-        if tip := self._waiting_tip(event, matches_key(2, self.min_stars)):
+        if tip := self._waiting_tip(event, MATCHES_RAW_KEY):
             yield tip
         try:
-            data = await self.client.get_today_matches(min_stars=self.min_stars)
+            data, note = await self._fetch_today_view()
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        data = self._filter_by_event(data)
         yield event.plain_result(
             formatter.format_today(
-                data, self.max_items, self.min_stars, bool(self.event_keywords)
+                data, self.max_items, self.min_stars, bool(self.event_keywords), note
             )
         )
 
@@ -112,24 +152,30 @@ class HltvPlugin(Star):
         """近期大赛，可带天数"""
         days = days if days > 0 else self.default_days
         days = min(days, 7)
-        if tip := self._waiting_tip(event, matches_key(days, self.min_stars)):
+        if tip := self._waiting_tip(event, MATCHES_RAW_KEY):
             yield tip
         try:
-            data = await self.client.get_matches(days=days, min_stars=self.min_stars)
+            data = self._filter_by_event(
+                await self.client.get_matches(days=days, min_stars=self.min_stars)
+            )
+            note = ""
+            if not data and (self.min_stars > 0 or self.event_keywords):
+                alt = await self.client.get_matches(days=days, min_stars=0)
+                if alt:
+                    data, note = alt, "（该时段无符合大赛条件的比赛，已显示全部场次）"
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        data = self._filter_by_event(data)
         yield event.plain_result(
             formatter.format_matches(
-                data, days, self.max_items, self.min_stars, bool(self.event_keywords)
+                data, days, self.max_items, self.min_stars, bool(self.event_keywords), note
             )
         )
 
     @hltv.command("live", alias={"直播"})
     async def live(self, event: AstrMessageEvent):
         """正在进行的比赛"""
-        if tip := self._waiting_tip(event, matches_key(1, 0)):
+        if tip := self._waiting_tip(event, MATCHES_RAW_KEY):
             yield tip
         try:
             data = await self.client.get_live_matches()
@@ -143,26 +189,53 @@ class HltvPlugin(Star):
         """近期赛果，可带天数"""
         days = days if days > 0 else self.default_days
         days = min(days, 7)
-        if tip := self._waiting_tip(event, results_key(days, self.min_stars)):
+        if tip := self._waiting_tip(event, results_key(days, 0)):
             yield tip
         try:
-            data = await self.client.get_results(days=days, min_stars=self.min_stars)
+            # 赛果不做星级过滤：已经打完的比赛用户要的是完整结果
+            data = await self.client.get_results(days=days)
         except HltvError as e:
             yield event.plain_result(str(e))
             return
         yield event.plain_result(formatter.format_results(data, days, self.max_items))
 
     @hltv.command("ranking", alias={"排名", "排行"})
-    async def ranking(self, event: AstrMessageEvent):
-        """战队世界排名 Top50"""
-        if tip := self._waiting_tip(event, RANKING_KEY):
+    async def ranking(self, event: AstrMessageEvent, kind: str = ""):
+        """排名：默认 Valve VRS，可加地区或 hltv"""
+        arg = kind.strip().lower()
+        if arg in ("hltv", "h"):
+            use_vrs, region = False, None
+            key, title = RANKING_HLTV_KEY, "🏆 HLTV 战队排名 Top50"
+        elif arg in ("", "v", "vrs", "valve"):
+            use_vrs, region = True, None
+            key, title = vrs_key(None), "🏆 Valve VRS 排名（全球）"
+        elif arg in VRS_REGIONS:
+            use_vrs, region = True, VRS_REGIONS[arg]
+            key = vrs_key(region)
+            title = f"🏆 Valve VRS 排名（{_REGION_CN.get(region, region)}）"
+        else:
+            yield event.plain_result(
+                "用法：/hltv ranking [地区|hltv]\n"
+                "· 默认显示 Valve VRS 全球排名（V社积分）\n"
+                "· 地区：asia/亚洲、europe/欧洲、americas/美洲\n"
+                "· hltv：HLTV 自家世界排名"
+            )
+            return
+        if tip := self._waiting_tip(event, key):
             yield tip
         try:
-            data = await self.client.get_top_teams(50)
+            if use_vrs:
+                data = await self.client.get_vrs_ranking(region)
+            else:
+                data = await self.client.get_top_teams(50)
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(formatter.format_ranking(data, self.max_items))
+        yield event.plain_result(
+            formatter.format_ranking(
+                data, self.max_items, title, show_region=(use_vrs and region is None)
+            )
+        )
 
     @hltv.command("events", alias={"赛事"})
     async def events(self, event: AstrMessageEvent):
@@ -209,20 +282,132 @@ class HltvPlugin(Star):
         yield event.plain_result(formatter.format_player(data))
 
     @hltv.command("news", alias={"新闻"})
-    async def news(self, event: AstrMessageEvent):
-        """今日新闻"""
-        if tip := self._waiting_tip(event, NEWS_KEY):
+    async def news(self, event: AstrMessageEvent, index: int = 0):
+        """今日新闻，加序号看详情"""
+        if tip := self._waiting_tip(event, NEWS_KEY if index <= 0 else None):
             yield tip
         try:
-            data = await self.client.get_news()
+            items = await self.client.get_news()
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(formatter.format_news(data, self.max_items))
+        if index > 0:
+            if index > len(items):
+                yield event.plain_result(
+                    f"没有第 {index} 条新闻（今日共 {len(items)} 条）。"
+                )
+                return
+            item = items[index - 1]
+            try:
+                detail = await self.client.get_news_detail(item["url"])
+            except HltvError as e:
+                yield event.plain_result(str(e))
+                return
+            title = detail.get("title") or item.get("title") or ""
+            paras = list(detail.get("paragraphs") or [])
+            if not paras and item.get("desc"):
+                paras = [str(item["desc"])]
+            if self.translate_news:
+                translated = await self.translator.translate([title] + paras)
+                title, paras = translated[0], translated[1:]
+            yield event.plain_result(
+                formatter.format_news_detail(title, paras, item["url"])
+            )
+            return
+        # 列表：只翻译将要展示的条目，且缓存过的不重复翻译
+        shown = items[: self.max_items] if self.max_items > 0 else items
+        if self.translate_news:
+            pending = [it for it in shown if not it.get("title_zh")]
+            if pending:
+                translated = await self.translator.translate(
+                    [str(it.get("title", "")) for it in pending]
+                )
+                for it, zh in zip(pending, translated):
+                    it["title_zh"] = zh
+        yield event.plain_result(formatter.format_news(items, self.max_items))
+
+    # ---------------------------------------------------------------- 订阅推送
+
+    @hltv.command("sub", alias={"订阅"})
+    async def sub(self, event: AstrMessageEvent):
+        """在本会话订阅每日赛程推送"""
+        umo = event.unified_msg_origin
+        sessions = [s for s in (self.config.get("push_sessions") or []) if s]
+        if umo in sessions:
+            yield event.plain_result("本会话已订阅每日赛程推送。")
+            return
+        sessions.append(umo)
+        self.config["push_sessions"] = sessions
+        self.config.save_config()
+        extra = "" if self.enable_push else "\n⚠️ 推送总开关未开启，请在 WebUI 插件配置中打开 enable_push。"
+        yield event.plain_result(f"✅ 已订阅，每天 {self.push_time} 推送今日赛程。{extra}")
+
+    @hltv.command("unsub", alias={"退订", "取消订阅"})
+    async def unsub(self, event: AstrMessageEvent):
+        """退订本会话的每日赛程推送"""
+        umo = event.unified_msg_origin
+        sessions = [s for s in (self.config.get("push_sessions") or []) if s]
+        if umo not in sessions:
+            yield event.plain_result("本会话没有订阅每日赛程推送。")
+            return
+        sessions.remove(umo)
+        self.config["push_sessions"] = sessions
+        self.config.save_config()
+        yield event.plain_result("已退订每日赛程推送。")
+
+    async def initialize(self):
+        """AstrBot 在每次加载/重载插件时都会调用 initialize；
+        on_astrbot_loaded 钩子只在进程启动时触发一次，WebUI 保存配置
+        走的是 reload 路径，用它启动推送会在重载后永远失效。"""
+        if self.enable_push and self._push_task is None:
+            self._push_task = asyncio.create_task(self._push_loop())
+            logger.info(f"[hltv] 每日推送已启动（{self.push_time}）")
+
+    def _seconds_until_push(self) -> float:
+        h, m = self._push_hm
+        now = self.client._now_local()
+        target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return max((target - now).total_seconds(), 1.0)
+
+    async def _push_loop(self):
+        while True:
+            try:
+                await asyncio.sleep(self._seconds_until_push())
+                await self._do_push()
+                # 跨过当前分钟，避免同一分钟内重复触发
+                await asyncio.sleep(61)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[hltv] 推送循环异常: {e!r}")
+                await asyncio.sleep(300)
+
+    async def _do_push(self):
+        sessions = [s for s in (self.config.get("push_sessions") or []) if s]
+        if not sessions:
+            return
+        try:
+            data, note = await self._fetch_today_view()
+        except HltvError as e:
+            logger.warning(f"[hltv] 每日推送查询失败，本次跳过: {e}")
+            return
+        text = "⏰ HLTV 每日赛程\n" + formatter.format_today(
+            data, self.max_items, self.min_stars, bool(self.event_keywords), note
+        )
+        for umo in sessions:
+            try:
+                await self.context.send_message(umo, MessageChain().message(text))
+            except Exception as e:
+                logger.warning(f"[hltv] 推送到 {umo} 失败: {e!r}")
 
     # ---------------------------------------------------------------- 生命周期
 
     async def terminate(self):
-        """插件卸载/停用时清理缓存。"""
+        """插件卸载/停用时清理。"""
+        if self._push_task is not None:
+            self._push_task.cancel()
+            self._push_task = None
         self.client.clear_cache()
         logger.info("[hltv] 插件已卸载")
