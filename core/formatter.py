@@ -19,6 +19,18 @@ def _omitted_line(omitted: int) -> str:
     return f"\n…… 另有 {omitted} 条未显示" if omitted else ""
 
 
+def _val(v: Any, fallback: str = "未知") -> str:
+    """归一化库返回的哨兵值。
+
+    hltv-async-api 解析失败时不是缺键，而是把键值置成 None / 'None' / ''，
+    直接渲染会把 Python 哨兵漏给用户（如"近期奖杯：None"），统一在此兜底。
+    """
+    s = "" if v is None else str(v).strip()
+    if s in ("", "None"):
+        return fallback
+    return s
+
+
 def _match_sort_key(m: dict) -> tuple:
     """直播中排最前，其余按日期（DD-MM-YYYY → 可排序的 ISO 形式）+ 时间。"""
     d = str(m.get("date", ""))
@@ -65,25 +77,42 @@ def _render_match_list(
     return "\n".join(lines) + _omitted_line(omitted)
 
 
-def _empty_hint(min_stars: int) -> str:
-    return "（可在配置中调低 min_stars 星级门槛）" if min_stars > 0 else ""
+def _empty_hint(min_stars: int, keywords_on: bool = False) -> str:
+    """空结果时提示用户是哪些过滤在起作用，别把锅只甩给星级。"""
+    knobs = []
+    if min_stars > 0:
+        knobs.append("调低 min_stars 星级门槛")
+    if keywords_on:
+        knobs.append("调整 event_keywords 关键词白名单")
+    return f"（可在配置中{'或'.join(knobs)}）" if knobs else ""
 
 
-def format_matches(matches: list[dict], days: int, max_items: int, min_stars: int = 0) -> str:
+def format_matches(
+    matches: list[dict],
+    days: int,
+    max_items: int,
+    min_stars: int = 0,
+    keywords_on: bool = False,
+) -> str:
     return _render_match_list(
         f"📅 近 {days} 天大赛（共 {len(matches)} 场{_stars_hint(min_stars)}）",
         matches,
         max_items,
-        f"📅 近 {days} 天没有符合条件的比赛{_empty_hint(min_stars)}。",
+        f"📅 近 {days} 天没有符合条件的比赛{_empty_hint(min_stars, keywords_on)}。",
     )
 
 
-def format_today(matches: list[dict], max_items: int, min_stars: int = 0) -> str:
+def format_today(
+    matches: list[dict],
+    max_items: int,
+    min_stars: int = 0,
+    keywords_on: bool = False,
+) -> str:
     return _render_match_list(
         f"📅 今日赛程（共 {len(matches)} 场{_stars_hint(min_stars)}）",
         matches,
         max_items,
-        f"📅 今天没有符合条件的比赛{_empty_hint(min_stars)}。",
+        f"📅 今天没有符合条件的比赛{_empty_hint(min_stars, keywords_on)}。",
     )
 
 
@@ -130,6 +159,15 @@ def format_ranking(teams: list[dict], max_items: int) -> str:
     return "\n".join(lines) + _omitted_line(omitted)
 
 
+def _event_date(s: Any) -> str:
+    """赛事日期是库产出的 'D-M' 串（如 '12-3' = 3月12日），中文语境下
+    极易被读反，转成明确的中文月日；解析不了原样返回。"""
+    parts = str(s).split("-")
+    if len(parts) == 2 and all(p.isdigit() for p in parts):
+        return f"{parts[1]}月{parts[0]}日"
+    return str(s)
+
+
 def format_events(events: list[dict], max_items: int) -> str:
     if not events:
         return "🎪 暂无赛事数据。"
@@ -138,7 +176,7 @@ def format_events(events: list[dict], max_items: int) -> str:
     for e in shown:
         lines.append(
             f"· {e.get('title', '?')}"
-            f"  [{e.get('start_date', '?')} ~ {e.get('end_date', '?')}]"
+            f"  [{_event_date(e.get('start_date', '?'))} ~ {_event_date(e.get('end_date', '?'))}]"
         )
     return "\n".join(lines) + _omitted_line(omitted)
 
@@ -149,26 +187,31 @@ def format_team(team: dict) -> str:
         roster = "、".join(str(p) for p in players.keys())
     else:
         roster = "、".join(str(p) for p in players)
+    # 库对解析失败的字段给哨兵值：rank/age = '0'、coach = ''、trophy = None
+    rank = _val(team.get("rank"), "0")
+    rank_str = "未上榜" if rank == "0" else f"世界排名 #{rank}"
+    age = _val(team.get("age"), "0")
     lines = [
-        f"🛡️ {team.get('title', '?')}（世界排名 #{team.get('rank', '?')}）",
+        f"🛡️ {_val(team.get('title'), '?')}（{rank_str}）",
         f"阵容：{roster or '未知'}",
-        f"教练：{team.get('coach', '未知')}",
-        f"平均年龄：{team.get('age', '未知')}",
-        f"近期奖杯：{team.get('last_trophy', '无')}",
-        f"奖杯总数：{team.get('total_trophies', '?')}",
+        f"教练：{_val(team.get('coach'))}",
+        f"平均年龄：{'未知' if age == '0' else age}",
+        f"近期奖杯：{_val(team.get('last_trophy'), '无')}",
+        f"奖杯总数：{_val(team.get('total_trophies'), '0')}",
     ]
     return "\n".join(lines)
 
 
 def format_player(player: dict) -> str:
+    # 无战队/退役选手的 team 字段是字符串 'None'（库的哨兵），_val 统一兜底
     lines = [
-        f"🎯 {player.get('nickname', '?')}（{player.get('name', '?')}）",
-        f"战队：{player.get('team', '未知')}",
-        f"国籍：{player.get('nationality', '未知')}  年龄：{player.get('age', '?')}",
-        f"Rating: {player.get('rating', '?')}  KPR: {player.get('kpr', '?')}"
-        f"  爆头率: {player.get('hs', '?')}",
-        f"MVP 数：{player.get('total_mvps', '?')}"
-        f"  奖杯总数：{player.get('total_trophies', '?')}",
+        f"🎯 {_val(player.get('nickname'), '?')}（{_val(player.get('name'), '?')}）",
+        f"战队：{_val(player.get('team'))}",
+        f"国籍：{_val(player.get('nationality'))}  年龄：{_val(player.get('age'), '?')}",
+        f"Rating: {_val(player.get('rating'), '?')}  KPR: {_val(player.get('kpr'), '?')}"
+        f"  爆头率: {_val(player.get('hs'), '?')}",
+        f"MVP 数：{_val(player.get('total_mvps'), '0')}"
+        f"  奖杯总数：{_val(player.get('total_trophies'), '0')}",
     ]
     return "\n".join(lines)
 
@@ -191,8 +234,12 @@ def format_news(news: list[dict], max_items: int) -> str:
 
 
 def _news_title(item: Any) -> str:
+    # 普通新闻的标题键是 title，头条（featured）的是 f_title——漏了后者
+    # 会把当天所有头条全部丢弃
     if isinstance(item, dict):
-        return str(item.get("title") or item.get("text") or "").strip()
+        return str(
+            item.get("title") or item.get("f_title") or item.get("text") or ""
+        ).strip()
     return str(item).strip()
 
 

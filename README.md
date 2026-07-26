@@ -9,7 +9,7 @@ AstrBot 插件：在聊天里查询 [HLTV](https://www.hltv.org/)（CS2 赛事�
 | `/hltv today` | 今日赛程（直播中优先，按开赛时间排序） |
 | `/hltv matches [天数]` | 近期大赛（默认 1 天，上限 7 天；星级门槛见配置） |
 | `/hltv live` | 正在进行的比赛 |
-| `/hltv results [天数]` | 近期赛果（默认 1 天） |
+| `/hltv results [天数]` | 近期赛果（默认 1 天，与 matches 一致按星级过滤） |
 | `/hltv ranking` | 战队世界排名 Top50 |
 | `/hltv events` | 近期赛事 |
 | `/hltv team <名称>` | 战队信息（任意战队：先匹配排名榜，再走站内搜索） |
@@ -63,7 +63,8 @@ core/formatter.py  展示层：原始数据 → 文本；全部 .get() 防御式
    选手搜索被拦时自动退回选手榜 Top100 模糊匹配。
 3. **直播判定是确定的**：`hltv-async-api` 源码中直播条目的 `date` 字段
    固定为 `'LIVE'`；未开赛条目日期格式为 `DD-MM-YYYY`（已按配置时区本地化），
-   `today` 据此过滤。
+   `today` 据此过滤。比赛列表的缓存单独压到 ≤60 秒（其余数据用 `cache_ttl`），
+   避免已结束的比赛在 live/today 里滞留。
 4. **必须 `safe_mode=False`**：库在 safe_mode 下 `get_matches` / `get_results` /
    `get_top_players` 直接返回 None，client.py 已显式关闭。
 5. 各接口返回字段以 [hltv-async-api](https://github.com/akimerslys/hltv-async-api)

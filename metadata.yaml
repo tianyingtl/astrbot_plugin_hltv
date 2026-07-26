@@ -1,5 +1,5 @@
 name: astrbot_plugin_hltv
 desc: HLTV 查询插件。今日赛程、近期大赛（星级过滤）、赛果、战队排名 Top50、任意战队/选手搜索、赛事与新闻。
-version: v1.0.0
+version: v1.0.1
 author: tianying
 repo: https://github.com/tianyingtl/astrbot_plugin_hltv

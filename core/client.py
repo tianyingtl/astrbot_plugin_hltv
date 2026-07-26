@@ -1,6 +1,6 @@
 """HLTV 数据访问层。
 
-上层（main.py 指令层）只依赖本模块的 HltvClient / HltvError，
+上层（main.py 指令层）只依赖本模块的 HltvClient / HltvError 与缓存键助手，
 不直接接触 hltv-async-api。之后若想更换数据源（自建爬虫、
 第三方 REST 镜像等），只需改写本文件，指令层与格式化层不动。
 
@@ -37,6 +37,10 @@ class HltvError(Exception):
 # 超过该时长的排队请求直接快速失败，避免用户无限等待。
 _QUEUE_TIMEOUT = 30
 
+# 比赛列表的缓存上限（秒）：live/today 的"进行中"状态不能吃默认 5 分钟
+# 缓存，否则已结束的比赛会滞留在直播列表里。
+_LIVE_TTL = 60
+
 # HLTV 站内搜索接口（返回 JSON），hltv-async-api 没有封装，自行请求。
 # 结构：[{"teams": [{id, name, ...}], "players": [{id, nickname, ...}], ...}]
 _SEARCH_URL = "https://www.hltv.org/search?term={}"
@@ -54,6 +58,23 @@ _BROWSER_HEADERS = {
 # 直播比赛的 date/time 字段固定为字符串 'LIVE'）
 _DATE_FMT = "%d-%m-%Y"
 LIVE = "LIVE"
+
+
+# ------------------------------------------------------------------ 缓存键
+# 指令层用它们探测"结果是否已有缓存"（决定要不要发等待提示），
+# 与本模块内部使用的键保持同源，避免两处拼写漂移。
+
+def matches_key(days: int, min_stars: int) -> str:
+    return f"matches:{days}:{min_stars}"
+
+
+def results_key(days: int, min_stars: int) -> str:
+    return f"results:{days}:{min_stars}"
+
+
+RANKING_KEY = "top_teams:50"
+EVENTS_KEY = "events"
+NEWS_KEY = "news"
 
 
 class HltvClient:
@@ -81,7 +102,8 @@ class HltvClient:
         self._timeout = timeout
         self._tz = tz
         self._cache_ttl = cache_ttl
-        self._cache: dict[str, tuple[float, Any]] = {}
+        # 键 -> (写入时刻, 该条目的 TTL, 值)
+        self._cache: dict[str, tuple[float, float, Any]] = {}
         # HLTV 有 Cloudflare 风控，串行化所有请求以降低触发概率
         self._lock = asyncio.Lock()
 
@@ -106,19 +128,28 @@ class HltvClient:
         hit = self._cache.get(key)
         if not hit:
             return None
-        if time.monotonic() - hit[0] >= self._cache_ttl:
+        ts, ttl, value = hit
+        if time.monotonic() - ts >= ttl:
             # 过期即删，避免长期运行时缓存字典无界增长
             del self._cache[key]
             return None
-        return hit[1]
+        return value
+
+    def is_fresh(self, key: str) -> bool:
+        """指令层探针：该键是否有未过期缓存（用于跳过等待提示）。"""
+        return self._cache_get(key) is not None
 
     async def _cached_locked(
-        self, cache_key: str, fetch: Callable[[], Awaitable[Any]]
+        self,
+        cache_key: str,
+        fetch: Callable[[], Awaitable[Any]],
+        ttl: float | None = None,
     ) -> Any:
         """统一入口：缓存 → 加锁（限时排队）→ 请求 → 缓存回填。
 
         fetch 内部应自行把异常归一化为 HltvError；返回 None 视为失败，
         空列表等空值是合法结果，照常缓存，避免"无数据"场景穿透缓存。
+        ttl 为该条目的缓存时长，缺省用全局 cache_ttl。
         """
         cached = self._cache_get(cache_key)
         if cached is not None:
@@ -138,10 +169,22 @@ class HltvClient:
         if result is None:
             raise HltvError("HLTV 未返回数据（可能被风控拦截）。")
         if self._cache_ttl > 0:
-            self._cache[cache_key] = (time.monotonic(), result)
+            self._cache[cache_key] = (
+                time.monotonic(),
+                ttl if ttl is not None else self._cache_ttl,
+                result,
+            )
         return result
 
-    async def _call(self, method: str, /, *args: Any, cache_key: str, **kwargs: Any) -> Any:
+    async def _call(
+        self,
+        method: str,
+        /,
+        *args: Any,
+        cache_key: str,
+        ttl: float | None = None,
+        **kwargs: Any,
+    ) -> Any:
         """调用 hltv-async-api 的方法。"""
         if Hltv is None:
             raise HltvError(
@@ -160,38 +203,49 @@ class HltvClient:
                     "可稍后重试或在插件配置中设置代理。"
                 ) from e
 
-        return await self._cached_locked(cache_key, fetch)
+        return await self._cached_locked(cache_key, fetch, ttl=ttl)
 
     async def _search(self, term: str) -> dict:
-        """HLTV 站内搜索，返回 {"players": [...], "teams": [...], ...}。"""
+        """HLTV 站内搜索，返回 {"players": [...], "teams": [...], ...}。
 
-        async def fetch() -> dict:
+        配置了多个代理时逐个尝试（对齐库内 _switch_proxy 的容错行为），
+        全部失败才抛错。
+        """
+
+        async def attempt(proxy: str | None) -> dict:
             url = _SEARCH_URL.format(quote(term))
-            proxy = self._proxy_list[0] if self._proxy_list else None
-            try:
-                client_timeout = aiohttp.ClientTimeout(total=self._timeout)
-                async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                    async with session.get(
-                        url, headers=_BROWSER_HEADERS, proxy=proxy
-                    ) as resp:
-                        if resp.status != 200:
-                            raise HltvError(
-                                f"HLTV 搜索接口返回 {resp.status}"
-                                "（可能被风控拦截，可稍后重试或配置代理）。"
-                            )
-                        data = await resp.json(content_type=None)
-            except HltvError:
-                raise
-            except Exception as e:
-                logger.error(f"[hltv] 搜索 {term!r} 失败: {e!r}")
-                raise HltvError(
-                    "请求 HLTV 搜索接口失败，可能是网络问题或触发了风控。"
-                ) from e
+            client_timeout = aiohttp.ClientTimeout(total=self._timeout)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.get(
+                    url, headers=_BROWSER_HEADERS, proxy=proxy
+                ) as resp:
+                    if resp.status != 200:
+                        raise HltvError(
+                            f"HLTV 搜索接口返回 {resp.status}"
+                            "（可能被风控拦截，可稍后重试或配置代理）。"
+                        )
+                    data = await resp.json(content_type=None)
             if isinstance(data, list) and data and isinstance(data[0], dict):
                 return data[0]
             if isinstance(data, dict):
                 return data
             return {}
+
+        async def fetch() -> dict:
+            last_err: Exception | None = None
+            for proxy in self._proxy_list or [None]:
+                try:
+                    return await attempt(proxy)
+                except Exception as e:
+                    logger.warning(
+                        f"[hltv] 搜索 {term!r} 经 {proxy or '直连'} 失败: {e!r}"
+                    )
+                    last_err = e
+            if isinstance(last_err, HltvError):
+                raise last_err
+            raise HltvError(
+                "请求 HLTV 搜索接口失败，可能是网络/代理问题或触发了风控。"
+            ) from last_err
 
         return await self._cached_locked(f"search:{term.strip().lower()}", fetch)
 
@@ -211,12 +265,17 @@ class HltvClient:
     # 返回结构均为 hltv-async-api 的原始数据，字段含义见 README「数据结构」一节。
 
     async def get_matches(self, days: int = 1, min_stars: int = 0) -> list[dict]:
-        """近期（含进行中）比赛列表，min_stars 为 HLTV 星级下限（0-5）。"""
+        """近期（含进行中）比赛列表，min_stars 为 HLTV 星级下限（0-5）。
+
+        含"进行中"状态，缓存时长压到 _LIVE_TTL，避免已结束的比赛
+        在 live/today 里滞留 5 分钟。
+        """
         return await self._call(
             "get_matches",
             days=days,
             min_rating=min_stars,
-            cache_key=f"matches:{days}:{min_stars}",
+            cache_key=matches_key(days, min_stars),
+            ttl=min(float(self._cache_ttl or _LIVE_TTL), _LIVE_TTL),
         )
 
     async def get_today_matches(self, min_stars: int = 0) -> list[dict]:
@@ -234,9 +293,19 @@ class HltvClient:
         matches = await self.get_matches(days=1, min_stars=0)
         return [m for m in matches if m.get("date") == LIVE]
 
-    async def get_results(self, days: int = 1) -> list[dict]:
-        """近期赛果。"""
-        return await self._call("get_results", days=days, cache_key=f"results:{days}")
+    async def get_results(self, days: int = 1, min_stars: int = 0) -> list[dict]:
+        """近期赛果，与 matches 一致按星级过滤。
+
+        featured=False：库默认会把"精选赛果"box 混进来——无日期、
+        可能超出天数窗口、且和按日分组的条目重复，这里只取按日列表。
+        """
+        return await self._call(
+            "get_results",
+            days=days,
+            min_rating=min_stars,
+            featured=False,
+            cache_key=results_key(days, min_stars),
+        )
 
     async def get_top_teams(self, max_teams: int = 50) -> list[dict]:
         """战队世界排名（HLTV 榜单有多少取多少，上限 max_teams）。"""
@@ -246,11 +315,13 @@ class HltvClient:
 
     async def get_events(self) -> list[dict]:
         """进行中/即将开始的赛事。"""
-        return await self._call("get_events", cache_key="events")
+        return await self._call("get_events", cache_key=EVENTS_KEY)
 
     async def get_news(self) -> list[dict]:
-        """今日新闻。"""
-        return await self._call("get_last_news", only_today=True, cache_key="news")
+        """今日新闻。max_reg_news 抬高到 10，库默认 2 条太少。"""
+        return await self._call(
+            "get_last_news", only_today=True, max_reg_news=10, cache_key=NEWS_KEY
+        )
 
     async def find_team(self, name: str) -> dict:
         """查战队：先在排名榜（Top 50）内模糊匹配（附带排名信息、命中率高），

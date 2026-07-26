@@ -10,7 +10,15 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
-from .core.client import HltvClient, HltvError
+from .core.client import (
+    EVENTS_KEY,
+    NEWS_KEY,
+    RANKING_KEY,
+    HltvClient,
+    HltvError,
+    matches_key,
+    results_key,
+)
 from .core import formatter
 
 
@@ -62,11 +70,16 @@ class HltvPlugin(Star):
             if any(k in str(m.get("event", "")).lower() for k in self.event_keywords)
         ]
 
-    def _waiting_tip(self, event: AstrMessageEvent):
-        """查询前的等待提示（可在 WebUI 配置中开关）。"""
-        if self.send_waiting_tip:
-            return event.plain_result("🔎 正在查询 HLTV，稍等…")
-        return None
+    def _waiting_tip(self, event: AstrMessageEvent, cache_key: str | None = None):
+        """查询前的等待提示（可在 WebUI 配置中开关）。
+
+        结果已有缓存时秒回，不发提示，免得群里连刷两条。
+        """
+        if not self.send_waiting_tip:
+            return None
+        if cache_key is not None and self.client.is_fresh(cache_key):
+            return None
+        return event.plain_result("🔎 正在查询 HLTV，稍等…")
 
     @filter.command_group("hltv")
     def hltv(self):
@@ -80,7 +93,7 @@ class HltvPlugin(Star):
     @hltv.command("today", alias={"今日", "今天", "今日赛程"})
     async def today(self, event: AstrMessageEvent):
         """今日赛程（直播优先）"""
-        if tip := self._waiting_tip(event):
+        if tip := self._waiting_tip(event, matches_key(2, self.min_stars)):
             yield tip
         try:
             data = await self.client.get_today_matches(min_stars=self.min_stars)
@@ -89,7 +102,9 @@ class HltvPlugin(Star):
             return
         data = self._filter_by_event(data)
         yield event.plain_result(
-            formatter.format_today(data, self.max_items, self.min_stars)
+            formatter.format_today(
+                data, self.max_items, self.min_stars, bool(self.event_keywords)
+            )
         )
 
     @hltv.command("matches", alias={"比赛", "大赛"})
@@ -97,7 +112,7 @@ class HltvPlugin(Star):
         """近期大赛，可带天数"""
         days = days if days > 0 else self.default_days
         days = min(days, 7)
-        if tip := self._waiting_tip(event):
+        if tip := self._waiting_tip(event, matches_key(days, self.min_stars)):
             yield tip
         try:
             data = await self.client.get_matches(days=days, min_stars=self.min_stars)
@@ -106,13 +121,15 @@ class HltvPlugin(Star):
             return
         data = self._filter_by_event(data)
         yield event.plain_result(
-            formatter.format_matches(data, days, self.max_items, self.min_stars)
+            formatter.format_matches(
+                data, days, self.max_items, self.min_stars, bool(self.event_keywords)
+            )
         )
 
     @hltv.command("live", alias={"直播"})
     async def live(self, event: AstrMessageEvent):
         """正在进行的比赛"""
-        if tip := self._waiting_tip(event):
+        if tip := self._waiting_tip(event, matches_key(1, 0)):
             yield tip
         try:
             data = await self.client.get_live_matches()
@@ -126,10 +143,10 @@ class HltvPlugin(Star):
         """近期赛果，可带天数"""
         days = days if days > 0 else self.default_days
         days = min(days, 7)
-        if tip := self._waiting_tip(event):
+        if tip := self._waiting_tip(event, results_key(days, self.min_stars)):
             yield tip
         try:
-            data = await self.client.get_results(days=days)
+            data = await self.client.get_results(days=days, min_stars=self.min_stars)
         except HltvError as e:
             yield event.plain_result(str(e))
             return
@@ -138,7 +155,7 @@ class HltvPlugin(Star):
     @hltv.command("ranking", alias={"排名", "排行"})
     async def ranking(self, event: AstrMessageEvent):
         """战队世界排名 Top50"""
-        if tip := self._waiting_tip(event):
+        if tip := self._waiting_tip(event, RANKING_KEY):
             yield tip
         try:
             data = await self.client.get_top_teams(50)
@@ -150,7 +167,7 @@ class HltvPlugin(Star):
     @hltv.command("events", alias={"赛事"})
     async def events(self, event: AstrMessageEvent):
         """近期赛事"""
-        if tip := self._waiting_tip(event):
+        if tip := self._waiting_tip(event, EVENTS_KEY):
             yield tip
         try:
             data = await self.client.get_events()
@@ -194,7 +211,7 @@ class HltvPlugin(Star):
     @hltv.command("news", alias={"新闻"})
     async def news(self, event: AstrMessageEvent):
         """今日新闻"""
-        if tip := self._waiting_tip(event):
+        if tip := self._waiting_tip(event, NEWS_KEY):
             yield tip
         try:
             data = await self.client.get_news()
