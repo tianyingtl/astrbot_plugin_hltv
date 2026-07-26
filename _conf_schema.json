@@ -1,0 +1,57 @@
+{
+  "min_stars": {
+    "description": "比赛星级门槛（0-5），matches/today 只显示不低于该星级的大赛",
+    "type": "int",
+    "hint": "HLTV 用 0-5 星标注比赛重要程度。默认 1 = 过滤掉 0 星小比赛；调成 0 显示全部，2-3 只看顶级对局。",
+    "default": 1
+  },
+  "event_keywords": {
+    "description": "大赛关键词白名单（可选），只显示赛事名含这些关键词的比赛",
+    "type": "list",
+    "hint": "例如 Major、IEM、BLAST、ESL、PGL。留空则不启用，仅按星级过滤。对 matches / today 生效。",
+    "default": []
+  },
+  "default_days": {
+    "description": "matches / results 不带参数时默认查询的天数（1-7）",
+    "type": "int",
+    "default": 1
+  },
+  "max_items": {
+    "description": "列表类结果（比赛/赛果/排名等）最多显示的条数",
+    "type": "int",
+    "default": 10
+  },
+  "send_waiting_tip": {
+    "description": "查询前先发送一条“正在查询”的提示",
+    "type": "bool",
+    "hint": "HLTV 爬取较慢（数秒到数十秒），开启后体验更好，但群里消息会多一条。",
+    "default": false
+  },
+  "timezone": {
+    "description": "比赛时间显示时区（today 的“今天”也按此判定）",
+    "type": "string",
+    "default": "Asia/Shanghai"
+  },
+  "proxy_list": {
+    "description": "代理列表（可选）",
+    "type": "list",
+    "hint": "例如 http://127.0.0.1:7890。HLTV 有 Cloudflare 风控，直连可能失败，建议配置代理；留空则直连。",
+    "default": []
+  },
+  "timeout": {
+    "description": "单次请求超时（秒）",
+    "type": "int",
+    "default": 15
+  },
+  "max_retries": {
+    "description": "请求失败时的最大重试次数",
+    "type": "int",
+    "default": 3
+  },
+  "cache_ttl": {
+    "description": "查询结果缓存时间（秒）",
+    "type": "int",
+    "hint": "同一查询在缓存期内直接返回上次结果，不再请求 HLTV，可显著降低被风控的概率。设为 0 关闭缓存。",
+    "default": 300
+  }
+}
