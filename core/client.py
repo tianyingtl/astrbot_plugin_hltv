@@ -9,7 +9,8 @@
 - team 页新增 "Valve ranking" 行导致库按位置取值错位 → 自建按标签解析
 - VRS（Valve 排名）为新功能，HLTV 站内 /valve-ranking/ 页面 → 自建解析
 - 新闻改自建主页解析：保留完整文章链接供详情查看
-- results / events / player 页选择器实测健在 → 继续用库
+- results / events 页选择器实测健在 → 继续用库
+- player 页新增 Top20 / Major / 奖杯信息，且库的旧统计选择器已失效 → 自建解析
 - 传输层统一复用库的 _fetch（重试/代理轮换/Cloudflare 检测）
 """
 
@@ -725,6 +726,108 @@ class HltvClient:
 
     # ---------------------------------------------------------------- 选手
 
+    @staticmethod
+    def _parse_player_page(page: Any, player_id: Any, nickname: str) -> dict:
+        """解析选手资料、年度 Top20、Major 与赛事冠军。"""
+        info: dict[str, Any] = {
+            "id": player_id,
+            "nickname": nickname,
+            "name": "",
+            "team": "",
+            "team_id": "",
+            "nationality": "",
+            "age": "",
+            "rating": "",
+            "rating_label": "Rating",
+            "top20": [],
+            "major_wins": 0,
+            "major_mvps": 0,
+            "championships": [],
+            "total_trophies": 0,
+            "total_mvps": 0,
+        }
+
+        nick_el = page.find("h1", class_="playerNickname")
+        if nick_el is not None:
+            info["nickname"] = nick_el.get_text(strip=True) or nickname
+
+        real_el = page.find("div", class_="playerRealname")
+        if real_el is not None:
+            info["name"] = real_el.get_text(" ", strip=True)
+            flag = real_el.find("img")
+            if flag is not None:
+                info["nationality"] = str(
+                    flag.get("title") or flag.get("alt") or ""
+                ).strip()
+
+        team_el = page.select_one(".playerTeam a[href^='/team/']")
+        if team_el is not None:
+            info["team"] = team_el.get_text(" ", strip=True)
+            parts = str(team_el.get("href") or "").split("/")
+            info["team_id"] = parts[2] if len(parts) > 2 else ""
+
+        age_el = page.select_one(".playerAge .listRight")
+        if age_el is not None:
+            age_match = re.search(r"\d+", age_el.get_text(" ", strip=True))
+            info["age"] = age_match.group() if age_match else ""
+
+        for stat in page.select(".playerpage-container .player-stat"):
+            label_el = stat.find("b")
+            label = label_el.get_text(" ", strip=True) if label_el else ""
+            if not label.lower().startswith("rating"):
+                continue
+            value_el = stat.select_one(".statsVal p") or stat.select_one(".statsVal")
+            info["rating_label"] = label or "Rating"
+            info["rating"] = value_el.get_text(" ", strip=True) if value_el else ""
+            break
+
+        for rank_el in page.select(".playerTop20 .top20ListRight a"):
+            rank_match = re.search(r"#(\d+)", rank_el.get_text(" ", strip=True))
+            year_el = rank_el.find_next_sibling("span", class_="top-20-year")
+            year_match = (
+                re.search(r"\d{2,4}", year_el.get_text(" ", strip=True))
+                if year_el is not None
+                else None
+            )
+            if not rank_match or not year_match:
+                continue
+            year = int(year_match.group())
+            if year < 100:
+                year += 2000
+            info["top20"].append({"year": year, "rank": int(rank_match.group(1))})
+
+        def count(selector: str) -> int:
+            el = page.select_one(selector)
+            match = re.search(r"\d+", el.get_text(" ", strip=True)) if el else None
+            return int(match.group()) if match else 0
+
+        info["major_wins"] = count(".majorSection .majorWinner")
+        info["major_mvps"] = count(".majorSection .majorMVP")
+        info["total_mvps"] = count(".trophySection .mvp-count")
+
+        for trophy in page.select(".trophySection a.trophy[href^='/events/']"):
+            desc = trophy.select_one(".trophyDescription")
+            name = str(desc.get("title") or "").strip() if desc else ""
+            if name:
+                info["championships"].append(
+                    {
+                        "name": name,
+                        "major": "majorTrophy" in (desc.get("class") or []),
+                    }
+                )
+        info["total_trophies"] = len(info["championships"])
+        return info
+
+    async def get_player_details(self, player_id: Any, nickname: str) -> dict:
+        async def fetch() -> dict:
+            slug = quote(nickname.replace(" ", "-").lower())
+            page = await self._fetch_raw(
+                f"https://www.hltv.org/player/{player_id}/{slug}"
+            )
+            return self._parse_player_page(page, player_id, nickname)
+
+        return await self._cached_locked(f"player:{player_id}", fetch)
+
     async def find_player(self, nickname: str) -> dict:
         """查选手：站内搜索优先，被风控时退回选手榜（Top 100）匹配。"""
         needle = nickname.strip().lower()
@@ -756,9 +859,7 @@ class HltvClient:
             if not matched:
                 raise HltvError(f"没有找到选手「{nickname}」。")
             pid, nick = matched["id"], matched["nickname"]
-        return await self._call(
-            "get_player_info", pid, str(nick), cache_key=f"player:{pid}"
-        )
+        return await self.get_player_details(pid, str(nick))
 
     # ---------------------------------------------------------------- 赛果/赛事
 

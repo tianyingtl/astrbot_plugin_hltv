@@ -16,7 +16,7 @@ AstrBot 插件：在聊天里查询 [HLTV](https://www.hltv.org/)（CS2 赛事�
 | `/hltv ranking hltv` | HLTV 自家世界排名 |
 | `/hltv events` | 近期赛事 |
 | `/hltv team <名称>` | 战队信息：VRS/HLTV 双排名、阵容+国旗、教练、年龄、奖杯、近期战绩 |
-| `/hltv player <昵称>` | 选手信息（任意选手） |
+| `/hltv player <昵称>` | 选手信息：Rating、HLTV TOP20、Major、赛事冠军与 MVP |
 | `/hltv news` | 今日新闻（编号列表，自动中文翻译） |
 | `/hltv news <序号>` | 新闻详情（正文摘要+翻译+原文链接） |
 | `/hltv sub` / `unsub` | 在本会话订阅/退订每日赛程推送 |
@@ -68,7 +68,8 @@ core/translator.py  微软翻译（免费 Edge 通道，失败回退原文）
 | VRS 排名 | **自建解析** | 新功能，HLTV 站内 `/valve-ranking/` 页面 |
 | HLTV 排名 | **自建解析** | 与 VRS 共用 `.ranked-team` 结构 |
 | 新闻 | **自建解析** | 保留完整文章链接供详情查看、不丢头条 |
-| results / events / player | 库 | 实测选择器健在 |
+| results / events | 库 | 实测选择器健在 |
+| player | **自建解析** | 展示年度 TOP20、Major、赛事冠军与 MVP；库的旧统计选择器已失效 |
 | 传输层 | 库 `_fetch` | 统一复用其重试/代理轮换/Cloudflare 检测 |
 
 ## 已知限制

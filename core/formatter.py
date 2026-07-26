@@ -137,11 +137,15 @@ def format_live(
             stars = "★" * int(m.get("rating") or 0)
             score = str(m.get("maps_score", "")).strip()
             mid = f" {score} " if score else " vs "
-            line = f"· {m.get('team1') or '?'}{mid}{m.get('team2') or '?'}  {stars}".rstrip()
+            matchup = f"{m.get('team1') or '?'}{mid}{m.get('team2') or '?'}  {stars}".rstrip()
             event = str(m.get("event", "")).strip()
             cur = str(m.get("current_map", "")).strip()
-            detail = f"{event}（{cur}）" if event and cur else (event or cur)
-            lines.append(f"{line}\n  {detail}" if detail else line)
+            if cur:
+                lines.append(f"· {cur}\n  {matchup}")
+            else:
+                lines.append(f"· {matchup}")
+            if event:
+                lines.append(f"  {event}")
     if delayed:
         lines.append("⏳ 已过开赛时间（延迟或刚开打，暂无直播数据）")
         for m in delayed[:5]:
@@ -275,11 +279,40 @@ def format_player(player: dict) -> str:
         f"🎯 {_val(player.get('nickname'), '?')}（{_val(player.get('name'), '?')}）",
         f"战队：{_val(player.get('team'))}",
         f"国籍：{_val(player.get('nationality'))}  年龄：{_val(player.get('age'), '?')}",
-        f"Rating: {_val(player.get('rating'), '?')}  KPR: {_val(player.get('kpr'), '?')}"
-        f"  爆头率: {_val(player.get('hs'), '?')}",
-        f"MVP 数：{_val(player.get('total_mvps'), '0')}"
-        f"  奖杯总数：{_val(player.get('total_trophies'), '0')}",
     ]
+
+    rating = _val(player.get("rating"), "")
+    if rating:
+        lines.append(f"{_val(player.get('rating_label'), 'Rating')}：{rating}")
+
+    top20 = player.get("top20") or []
+    if top20:
+        ranking = "、".join(
+            f"{item.get('year', '?')} #{item.get('rank', '?')}" for item in top20
+        )
+        lines.append(f"🥇 HLTV TOP20：{ranking}")
+
+    major_wins = int(player.get("major_wins") or 0)
+    major_mvps = int(player.get("major_mvps") or 0)
+    trophies = int(player.get("total_trophies") or 0)
+    mvps = int(player.get("total_mvps") or 0)
+    honors = []
+    if major_wins or major_mvps:
+        major = f"Major {major_wins} 冠"
+        if major_mvps:
+            major += f"（{major_mvps} 次 MVP）"
+        honors.append(major)
+    if trophies:
+        honors.append(f"赛事冠军 {trophies} 次")
+    if mvps:
+        honors.append(f"赛事 MVP {mvps} 次")
+    lines.append(f"🏆 荣誉：{' | '.join(honors) if honors else '暂未收录'}")
+
+    championships = player.get("championships") or []
+    if championships:
+        latest = "、".join(str(item.get("name") or "?") for item in championships[:3])
+        more = " 等" if len(championships) > 3 else ""
+        lines.append(f"最近冠军：{latest}{more}")
     return "\n".join(lines)
 
 
