@@ -324,4 +324,5 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv sub — 在本会话订阅每日赛程推送（unsub 退订）
 /hltv help — 显示本帮助
 所有子指令均可用中文，如：
-/hltv 今日、/hltv 排名 亚洲、/hltv 战队 spirit、/hltv 新闻 2"""
+/hltv 今日、/hltv 排名 亚洲、/hltv 战队 spirit、/hltv 新闻 2
+群里直接发 /hltv 指令即可，无需 @ 机器人"""

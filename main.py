@@ -65,6 +65,8 @@ class HltvPlugin(Star):
         ]
         self.default_days = max(1, min(int(config.get("default_days", 1)), 7))
         self.send_waiting_tip = bool(config.get("send_waiting_tip", False))
+        # 群里直接发 /hltv 指令即可响应,无需 @ 机器人或依赖全局唤醒前缀
+        self.free_wake = bool(config.get("free_wake", True))
         self.translate_news = bool(config.get("translate_news", True))
         self.enable_push = bool(config.get("enable_push", False))
         self._push_hm = self._parse_push_time(str(config.get("push_time", "09:00")))
@@ -417,21 +419,8 @@ class HltvPlugin(Star):
                     it["title_zh"] = zh
         yield event.plain_result(formatter.format_news(items, self.max_items))
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def unknown_subcommand_hint(self, event: AstrMessageEvent):
-        """拼错子指令时给出纠错提示（如 hltv new → news）。
-
-        框架对"组名对、子指令不认识"的消息不派发任何 handler，
-        用户只会看到沉默；这里兜底。合法子指令会被前面的 return 跳过，
-        不会造成重复回复。"""
-        if not getattr(event, "is_at_or_wake_command", False):
-            return
-        tokens = (event.message_str or "").strip().split()
-        if len(tokens) < 2 or tokens[0].lower() != "hltv":
-            return  # 非本插件消息；裸 /hltv 由框架自动回复指令树
-        if tokens[1].lower() in _KNOWN_SUBCOMMANDS:
-            return
-        typo = tokens[1]
+    @staticmethod
+    def _typo_hint(typo: str) -> str:
         close = difflib.get_close_matches(
             typo.lower(), _KNOWN_SUBCOMMANDS, n=1, cutoff=0.5
         )
@@ -440,7 +429,73 @@ class HltvPlugin(Star):
             if close
             else "。发送 /hltv help 查看全部指令。"
         )
-        yield event.plain_result(f"❓ 未知子指令「{typo}」{hint}")
+        return f"❓ 未知子指令「{typo}」{hint}"
+
+    async def _dispatch(self, event: AstrMessageEvent, tokens: list[str]):
+        """免 @ 模式的手动分发：token → 对应指令 handler。"""
+        sub = tokens[1].lower() if len(tokens) > 1 else ""
+        args = tokens[2:]
+
+        def _int_arg(default: int = 0) -> int:
+            try:
+                return int(args[0])
+            except (IndexError, ValueError):
+                return default
+
+        if not sub or sub in ("help", "帮助"):
+            handler = self.help(event)
+        elif sub in ("today", "今日", "今天", "今日赛程"):
+            handler = self.today(event)
+        elif sub in ("matches", "比赛", "大赛"):
+            handler = self.matches(event, days=_int_arg())
+        elif sub in ("live", "直播"):
+            handler = self.live(event)  # 队名由 _rest_after 从原文提取
+        elif sub in ("results", "赛果", "结果"):
+            handler = self.results(event, days=_int_arg())
+        elif sub in ("ranking", "排名", "排行"):
+            handler = self.ranking(event, kind=args[0] if args else "")
+        elif sub in ("events", "赛事"):
+            handler = self.events(event)
+        elif sub in ("team", "战队"):
+            handler = self.team(event)
+        elif sub in ("player", "选手"):
+            handler = self.player(event)
+        elif sub in ("news", "新闻"):
+            handler = self.news(event, index=_int_arg())
+        elif sub in ("sub", "订阅"):
+            handler = self.sub(event)
+        elif sub in ("unsub", "退订", "取消订阅"):
+            handler = self.unsub(event)
+        else:
+            yield event.plain_result(self._typo_hint(tokens[1]))
+            return
+        async for r in handler:
+            yield r
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def catch_hltv_messages(self, event: AstrMessageEvent):
+        """两件事：
+        1. 免 @ 响应——群里没 @ 机器人、全局唤醒前缀也没命中时，
+           以 /hltv 开头的消息由本插件自行分发（free_wake 配置可关）；
+        2. 正常唤醒但子指令拼错时给纠错提示（框架对未知子指令静默）。
+        合法指令走框架派发，这里会跳过，不会重复回复。"""
+        tokens = (event.message_str or "").strip().split()
+        if not tokens:
+            return
+        head = tokens[0].lower()
+        if getattr(event, "is_at_or_wake_command", False):
+            # 已唤醒：唤醒前缀已被剥掉，首 token 是 "hltv"
+            if head != "hltv" or len(tokens) < 2:
+                return
+            if tokens[1].lower() in _KNOWN_SUBCOMMANDS:
+                return
+            yield event.plain_result(self._typo_hint(tokens[1]))
+            return
+        # 未唤醒：只认 "/hltv" 开头，避免误伤普通聊天
+        if not self.free_wake or head != "/hltv":
+            return
+        async for r in self._dispatch(event, tokens):
+            yield r
 
     # ---------------------------------------------------------------- 订阅推送
 

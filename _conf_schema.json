@@ -42,6 +42,12 @@
     "type": "int",
     "default": 10
   },
+  "free_wake": {
+    "description": "免 @ 响应：直接发 /hltv 指令即可，无需 @ 机器人或开启全局 / 唤醒前缀",
+    "type": "bool",
+    "hint": "插件自行监听以 /hltv 开头的消息并响应。关闭后只能通过 @ 或全局唤醒前缀触发。",
+    "default": true
+  },
   "send_waiting_tip": {
     "description": "查询前先发送一条“正在查询”的提示",
     "type": "bool",
