@@ -59,6 +59,7 @@ _MATCHES_URL = "https://www.hltv.org/matches"
 _RANKING_URL = "https://www.hltv.org/ranking/teams"
 _VRS_URL = "https://www.hltv.org/valve-ranking/teams"
 _HOME_URL = "https://www.hltv.org/"
+_TOP20_IMAGE_HOSTS = {"www.hltv.org", "img-cdn.hltv.org", "pbs.twimg.com"}
 
 _BROWSER_HEADERS = {
     "referer": "https://www.hltv.org/",
@@ -1160,6 +1161,10 @@ class HltvClient:
             rf"top-20-players-of-{year}-(?:final-list|final-ranking)",
             re.IGNORECASE,
         )
+        recap = re.compile(
+            rf"/news/\d+/video-top-20-players-of-{year}/?$",
+            re.IGNORECASE,
+        )
         fallback = re.compile(
             rf"top\s*20\s+players\s+of\s+{year}.*final\s+(?:list|ranking)",
             re.IGNORECASE,
@@ -1174,6 +1179,10 @@ class HltvClient:
                     return url
         for link in links:
             href = str(link.get("href") or "").strip()
+            if recap.search(href):
+                return urljoin("https://www.hltv.org/", href)
+        for link in links:
+            href = str(link.get("href") or "").strip()
             text = link.get_text(" ", strip=True)
             if fallback.search(f"{text} {href.replace('-', ' ')}"):
                 url = urljoin("https://www.hltv.org/", href)
@@ -1184,12 +1193,13 @@ class HltvClient:
 
     @staticmethod
     def _parse_top20_image_url(page: Any, year: int) -> str:
-        allowed_hosts = {"www.hltv.org", "img-cdn.hltv.org"}
-
-        def official_url(value: Any) -> str:
-            url = urljoin("https://www.hltv.org/", str(value or "").strip())
+        def trusted_url(value: Any) -> str:
+            source = str(value or "").strip()
+            if source.startswith("http://pbs.twimg.com/"):
+                source = "https://" + source.removeprefix("http://")
+            url = urljoin("https://www.hltv.org/", source)
             parsed = urlparse(url)
-            if parsed.scheme == "https" and parsed.hostname in allowed_hosts:
+            if parsed.scheme == "https" and parsed.hostname in _TOP20_IMAGE_HOSTS:
                 return url
             return ""
 
@@ -1204,7 +1214,7 @@ class HltvClient:
                 source = str(image.get("srcset")).split(",", 1)[0].strip().split(" ", 1)[0]
             parent_link = image.find_parent("a", href=True)
             if parent_link is not None:
-                linked_url = official_url(parent_link.get("href"))
+                linked_url = trusted_url(parent_link.get("href"))
                 if Path(urlparse(linked_url).path).suffix.lower() in {
                     ".png",
                     ".jpg",
@@ -1213,9 +1223,10 @@ class HltvClient:
                     ".gif",
                 }:
                     source = linked_url
-            url = official_url(source)
+            url = trusted_url(source)
             if not url:
                 continue
+            image_host = urlparse(url).hostname
             context = " ".join(
                 str(value or "")
                 for value in (
@@ -1235,6 +1246,12 @@ class HltvClient:
                 score += 6
             if any(token in context for token in ("final", "ranking", "players")):
                 score += 2
+            if image_host == "pbs.twimg.com":
+                score += 5
+            if image.find_parent(
+                "blockquote", class_=re.compile("twitter", re.IGNORECASE)
+            ):
+                score += 5
             if image.find_parent("figure") is not None:
                 score += 4
             elif image.find_parent("article") is not None or image.find_parent(
@@ -1247,7 +1264,7 @@ class HltvClient:
 
         meta = page.find("meta", attrs={"property": "og:image"})
         if meta is not None:
-            url = official_url(meta.get("content"))
+            url = trusted_url(meta.get("content"))
             if url:
                 context = url.lower()
                 score = 3
@@ -1293,10 +1310,17 @@ class HltvClient:
                     else match.group(1).replace("-", " ").strip()
                 )
                 if name:
+                    flag = link.find("img", class_="flag")
+                    country = (
+                        str(flag.get("title") or flag.get("alt") or "").strip()
+                        if flag is not None
+                        else ""
+                    )
                     if title_match or rank not in players:
                         players[rank] = {
                             "rank": rank,
                             "name": name,
+                            "country": country,
                             "url": f"https://www.hltv.org{path}",
                         }
         return [players[rank] for rank in sorted(players)]
@@ -1331,7 +1355,7 @@ class HltvClient:
             raise HltvError("浏览器指纹下载组件未安装。")
 
         image_host = urlparse(url).hostname
-        if image_host not in {"www.hltv.org", "img-cdn.hltv.org"}:
+        if image_host not in _TOP20_IMAGE_HOSTS:
             raise HltvError("HLTV TOP20 图片地址无效。")
         referer_url = urlparse(referer)
         safe_referer = (
@@ -1374,10 +1398,7 @@ class HltvClient:
                 except Exception:
                     pass
 
-        if urlparse(final_url).hostname not in {
-            "www.hltv.org",
-            "img-cdn.hltv.org",
-        }:
+        if urlparse(final_url).hostname not in _TOP20_IMAGE_HOSTS:
             raise HltvError("HLTV TOP20 图片跳转到了非官方地址。")
         if status != 200:
             raise HltvError(f"HLTV TOP20 图片下载失败（HTTP {status}）。")
@@ -1393,10 +1414,7 @@ class HltvClient:
         proxy: str | None = None,
     ) -> Path:
         parsed = urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname not in {
-            "www.hltv.org",
-            "img-cdn.hltv.org",
-        }:
+        if parsed.scheme != "https" or parsed.hostname not in _TOP20_IMAGE_HOSTS:
             raise HltvError("HLTV TOP20 图片地址无效。")
 
         cache_dir = Path.home() / ".astrbot_plugin_hltv" / "top20"
@@ -1426,7 +1444,7 @@ class HltvClient:
                 headers=headers,
                 timeout=timeout,
             ) as response:
-                if response.url.host not in {"www.hltv.org", "img-cdn.hltv.org"}:
+                if response.url.host not in _TOP20_IMAGE_HOSTS:
                     raise HltvError("HLTV TOP20 图片跳转到了非官方地址。")
                 if response.status != 200:
                     raise HltvError(
@@ -1434,7 +1452,10 @@ class HltvClient:
                     )
                 return await response.content.read(12 * 1024 * 1024 + 1)
 
-        if parsed.hostname == "img-cdn.hltv.org" and CurlSession is not None:
+        if (
+            parsed.hostname in {"img-cdn.hltv.org", "pbs.twimg.com"}
+            and CurlSession is not None
+        ):
             body = await asyncio.to_thread(
                 self._download_top20_image_browser,
                 url,

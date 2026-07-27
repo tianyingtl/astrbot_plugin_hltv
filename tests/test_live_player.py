@@ -34,6 +34,7 @@ from core.renderer import (
     CARD_BASE_BACKGROUND,
     CARD_SIZE,
     PLAYER_CARD_SIZE,
+    TOP20_CARD_SIZE,
     WIDE_BACKGROUND,
     _pick_background,
     render_events_card,
@@ -193,6 +194,38 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
             session=fake_hltv.session,
             proxy=None,
         )
+
+    def test_old_top20_video_recap_and_twitter_image_are_resolved(self):
+        archive = BeautifulSoup(
+            '<a href="/news/14029/video-top-20-players-of-2014">Video</a>',
+            "lxml",
+        )
+        article = BeautifulSoup(
+            '<blockquote class="twitter-tweet"><img '
+            'src="http://pbs.twimg.com/media/B77G8-0IIAAEGLZ.png"></blockquote>',
+            "lxml",
+        )
+
+        self.assertEqual(
+            HltvClient._parse_top20_article_url(archive, 2014),
+            "https://www.hltv.org/news/14029/video-top-20-players-of-2014",
+        )
+        self.assertEqual(
+            HltvClient._parse_top20_image_url(article, 2014),
+            "https://pbs.twimg.com/media/B77G8-0IIAAEGLZ.png",
+        )
+
+    def test_top20_archive_keeps_player_country(self):
+        archive = BeautifulSoup(
+            '<a href="/news/14010/top-20-players-of-2014-get-right-1">'
+            '<img class="newsflag flag" title="Sweden">'
+            'Top 20 players of 2014: GeT_RiGhT (1)</a>',
+            "lxml",
+        )
+
+        players = HltvClient._parse_top20_players([archive], 2014)
+
+        self.assertEqual(players[0]["country"], "Sweden")
 
     async def test_top20_falls_back_to_archive_ranking_when_cdn_is_forbidden(self):
         january = self._archive(2023, range(1, 9), final=True)
@@ -373,34 +406,41 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.calls[0][1]["referer"], article_url)
         self.assertTrue(session.closed)
 
-    async def test_cdn_download_uses_browser_fingerprint_route(self):
+    async def test_protected_image_hosts_use_browser_fingerprint_route(self):
         output = BytesIO()
         Image.new("RGB", (800, 900), "white").save(output, "JPEG")
         image_body = output.getvalue()
-        image_url = "https://img-cdn.hltv.org/gallerypicture/browser-route-test.png"
         article_url = "https://www.hltv.org/news/1/top-20-test"
-        client = HltvClient(cache_ttl=0)
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "core.client.CurlSession", object()
-        ), patch.object(Path, "home", return_value=Path(tmp)), patch.object(
-            HltvClient,
-            "_download_top20_image_browser",
-            return_value=image_body,
-        ) as browser_download:
-            result = await client._download_top20_image(
-                image_url,
-                2025,
-                referer=article_url,
-            )
-
-        self.assertEqual(result.suffix, ".jpg")
-        browser_download.assert_called_once_with(
-            image_url,
-            referer=article_url,
-            proxy=None,
-            timeout=30,
+        image_urls = (
+            "https://img-cdn.hltv.org/gallerypicture/browser-route-test.png",
+            "https://pbs.twimg.com/media/annual-recap.png",
         )
+
+        for image_url in image_urls:
+            with (
+                self.subTest(image_url=image_url),
+                tempfile.TemporaryDirectory() as tmp,
+                patch("core.client.CurlSession", object()),
+                patch.object(Path, "home", return_value=Path(tmp)),
+                patch.object(
+                    HltvClient,
+                    "_download_top20_image_browser",
+                    return_value=image_body,
+                ) as browser_download,
+            ):
+                result = await HltvClient(cache_ttl=0)._download_top20_image(
+                    image_url,
+                    2025,
+                    referer=article_url,
+                )
+
+            self.assertEqual(result.suffix, ".jpg")
+            browser_download.assert_called_once_with(
+                image_url,
+                referer=article_url,
+                proxy=None,
+                timeout=30,
+            )
 
     def test_top20_player_fallback_card_renders(self):
         item = {
@@ -433,7 +473,7 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
                 output_dir=Path(tmp),
             )
             with Image.open(output) as card:
-                self.assertEqual(card.size, CARD_SIZE)
+                self.assertEqual(card.size, TOP20_CARD_SIZE)
                 self.assertIsNotNone(card.getbbox())
 
 

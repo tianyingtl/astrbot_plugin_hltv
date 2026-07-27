@@ -29,6 +29,7 @@ BUNDLED_FONT = ROOT / "assets" / "fonts" / "HLTVCardSans-Regular.otf"
 BUNDLED_FONT_BOLD = ROOT / "assets" / "fonts" / "HLTVCardSans-Bold.otf"
 CARD_SIZE = (1600, 1000)
 PLAYER_CARD_SIZE = (1600, 1400)
+TOP20_CARD_SIZE = (1600, 1600)
 
 INK = (247, 244, 245, 255)
 MUTED = (196, 187, 191, 255)
@@ -707,31 +708,122 @@ def render_top20_card(
     background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(
-        _pick_background(background_path), centering=(0.5, 0.35)
+    gold = (244, 190, 118, 255)
+    gold_soft = (244, 190, 118, 105)
+    selected_background = _pick_background(background_path)
+    if not selected_background.is_file():
+        raise RenderError(f"Card background does not exist: {selected_background}")
+    with Image.open(selected_background) as source:
+        background = ImageOps.fit(
+            source.convert("RGB"), TOP20_CARD_SIZE, Image.Resampling.LANCZOS
+        )
+    background = ImageEnhance.Color(background).enhance(0.28).convert("RGBA")
+    canvas = Image.alpha_composite(
+        background, Image.new("RGBA", TOP20_CARD_SIZE, (4, 5, 7, 210))
     )
-    _section_header(draw, f"HLTV TOP 20 / {year}", "年度选手排名  ·  数据来源 HLTV")
-    shown = sorted(
-        players, key=lambda item: int(item.get("rank") or 99)
-    )[:20]
-    if not shown:
-        draw.text((72, 330), "当前没有年度排名数据", font=_font(34, True), fill=MUTED)
-    for index, player in enumerate(shown):
-        col, row = index // 10, index % 10
-        x, y = 72 + col * 748, 288 + row * 65
-        if row:
-            draw.line((x, y - 5, x + 680, y - 5), fill=LINE, width=1)
-        rank = int(player.get("rank") or index + 1)
-        rank_color = ACCENT if rank <= 3 else MUTED
-        draw.text((x, y + 7), f"{rank:02d}", font=_font(34, True), fill=rank_color)
-        name = str(player.get("name") or "?")
-        name_font = _fit_font(draw, name, 29, 545, bold=True, minimum=21)
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    draw.rectangle((0, 0, 1599, 1599), outline=gold_soft, width=2)
+    draw.text((38, 34), "TOP 20 PLAYERS", font=_font(76, True), fill=gold)
+    draw.text((38, 112), f"OF {year}", font=_font(70, True), fill=gold)
+    draw.text((1190, 72), "HLTV", font=_font(34, True), fill=INK)
+    draw.text((1190, 116), "ANNUAL RANKING", font=_font(22, True), fill=gold)
+    draw.line((38, 214, 1562, 214), fill=gold_soft, width=2)
+
+    ranked = {
+        int(player.get("rank") or 0): player
+        for player in players
+        if str(player.get("rank") or "").isdigit()
+    }
+    cell_width, cell_height = 368, 238
+    for rank in range(1, 21):
+        row, col = divmod(rank - 1, 4)
+        x = 36 + col * 386
+        y = 244 + row * 256
+        player = ranked.get(rank, {})
+        name = str(player.get("name") or "PENDING")
+        image_path = Path(str(player.get("image_path") or ""))
+        has_photo = False
+        if image_path.is_file():
+            try:
+                with Image.open(image_path) as source:
+                    photo = ImageOps.fit(
+                        source.convert("RGB"),
+                        (cell_width, cell_height),
+                        Image.Resampling.LANCZOS,
+                        centering=(0.58, 0.38),
+                    ).convert("RGBA")
+                photo = ImageEnhance.Color(photo).enhance(0.78)
+                canvas.alpha_composite(photo, (x, y))
+                has_photo = True
+            except OSError:
+                pass
+        if not has_photo:
+            shade = 17 + rank % 5 * 4
+            draw.rectangle(
+                (x, y, x + cell_width, y + cell_height),
+                fill=(shade, shade + 1, shade + 5, 245),
+            )
+            draw.line(
+                (x + 18, y + cell_height - 18, x + cell_width - 18, y + 18),
+                fill=(244, 190, 118, 28),
+                width=4,
+            )
+            parts = [part for part in re.split(r"[_\-\s]+", name) if part]
+            initials = "".join(part[0] for part in parts[:2]).upper() or "?"
+            initial_font = _fit_font(
+                draw, initials, 104, cell_width - 80, bold=True, minimum=64
+            )
+            bounds = draw.textbbox((0, 0), initials, font=initial_font)
+            draw.text(
+                (
+                    x
+                    + (cell_width - (bounds[2] - bounds[0])) // 2
+                    - bounds[0],
+                    y + 46,
+                ),
+                initials,
+                font=initial_font,
+                fill=(244, 190, 118, 58),
+            )
+
+        draw.rectangle(
+            (x, y + 164, x + cell_width, y + cell_height),
+            fill=(3, 4, 6, 210),
+        )
+        border = gold if rank <= 3 else (244, 190, 118, 175)
+        draw.rectangle(
+            (x, y, x + cell_width, y + cell_height),
+            outline=border,
+            width=3 if rank <= 3 else 2,
+        )
+        draw.rectangle((x + 12, y + 12, x + 78, y + 52), fill=gold)
         draw.text(
-            (x + 104, y + 10),
-            _ellipsize(draw, name, name_font, 545),
+            (x + 22, y + 17),
+            f"#{rank}",
+            font=_font(24, True),
+            fill=(11, 10, 10, 255),
+        )
+        name_font = _fit_font(
+            draw, name.upper(), 38, cell_width - 28, bold=True, minimum=25
+        )
+        draw.text(
+            (x + 14, y + 171),
+            _ellipsize(draw, name.upper(), name_font, cell_width - 28),
             font=name_font,
             fill=INK,
         )
+        country = str(player.get("country") or "HLTV PLAYER").upper()
+        draw.text(
+            (x + 16, y + 211),
+            _ellipsize(draw, country, _font(18, True), cell_width - 32),
+            font=_font(18, True),
+            fill=gold,
+        )
+
+    draw.text((38, 1540), "HLTV.ORG", font=_font(22, True), fill=gold)
+    draw.text(
+        (1280, 1540), "TOP 20 ARCHIVE", font=_font(22, True), fill=MUTED
+    )
     return _save(canvas, output_dir, f"top20_{year}.png")
 
 
