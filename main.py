@@ -4,7 +4,7 @@
     main.py             指令注册、参数解析、翻译/推送编排（本文件）
     core/client.py      HLTV 数据访问（缓存、限流、自建解析器）
     core/formatter.py   数据 → 文本消息
-    core/renderer.py    战队/选手图片卡渲染
+    core/renderer.py    查询结果图片卡渲染
     core/subscriptions.py 直播提醒持久化与状态流转
     core/translator.py  微软翻译（免费 Edge 通道）
 """
@@ -31,7 +31,16 @@ from .core.client import (
     results_key,
     vrs_key,
 )
-from .core.renderer import render_player_card, render_team_card
+from .core.renderer import (
+    render_events_card,
+    render_live_card,
+    render_matches_card,
+    render_news_card,
+    render_player_card,
+    render_ranking_card,
+    render_results_card,
+    render_team_card,
+)
 from .core.subscriptions import (
     LiveSubscriptionStore,
     advance_subscription,
@@ -213,6 +222,25 @@ class HltvPlugin(Star):
                 data, note = alt, "（今日无符合大赛条件的比赛，已显示全部场次）"
         return data, note
 
+    @staticmethod
+    async def _image_or_text(
+        event: AstrMessageEvent,
+        renderer,
+        fallback: str,
+        *args,
+        log_name: str,
+        **kwargs,
+    ):
+        try:
+            card = await asyncio.to_thread(renderer, *args, **kwargs)
+            return event.image_result(str(card))
+        except Exception as e:
+            logger.warning(f"[hltv] {log_name}渲染失败，回退文本: {e!r}")
+            return event.plain_result(fallback)
+
+    def _limit_items(self, items: list[dict]) -> list[dict]:
+        return items[: self.max_items] if self.max_items > 0 else items
+
     # ------------------------------------------------------------------ 指令组
 
     @filter.command_group("hltv")
@@ -234,10 +262,19 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(
-            formatter.format_today(
-                data, self.max_items, self.min_stars, bool(self.event_keywords), note
-            )
+        fallback = formatter.format_today(
+            data, self.max_items, self.min_stars, bool(self.event_keywords), note
+        )
+        shown = self._limit_items(data)
+        subtitle = note or f"共 {len(data)} 场  /  显示前 {len(shown)} 场"
+        yield await self._image_or_text(
+            event,
+            render_matches_card,
+            fallback,
+            shown,
+            "今日赛程",
+            subtitle=subtitle,
+            log_name="今日赛程卡片",
         )
 
     @hltv.command("matches", alias={"比赛", "大赛"})
@@ -259,10 +296,19 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(
-            formatter.format_matches(
-                data, days, self.max_items, self.min_stars, bool(self.event_keywords), note
-            )
+        fallback = formatter.format_matches(
+            data, days, self.max_items, self.min_stars, bool(self.event_keywords), note
+        )
+        shown = self._limit_items(data)
+        subtitle = note or f"共 {len(data)} 场  /  显示前 {len(shown)} 场"
+        yield await self._image_or_text(
+            event,
+            render_matches_card,
+            fallback,
+            shown,
+            f"近 {days} 天赛程",
+            subtitle=subtitle,
+            log_name="赛程卡片",
         )
 
     @hltv.command("live", alias={"直播"})
@@ -337,19 +383,31 @@ class HltvPlugin(Star):
                     logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
             if mine:
                 text = formatter.format_live(mine)
+                footer = ""
                 if watched:
                     self._ensure_live_watch_task()
-                    text += f"\n\n已订阅 {watched} 场：新地图开始和完赛 Rating 会 @ 你。"
+                    footer = f"已订阅 {watched} 场：新地图开始和完赛 Rating 会 @ 你。"
+                    text += f"\n\n{footer}"
                 elif already_watching:
-                    text += "\n\n这场比赛已在监听；新地图开始和完赛时会 @ 你。"
+                    footer = "这场比赛已在监听；新地图开始和完赛时会 @ 你。"
+                    text += f"\n\n{footer}"
                 if not sender_id:
-                    text += "\n\n当前平台未提供用户 ID，无法建立 @ 提醒。"
+                    footer = "当前平台未提供用户 ID，无法建立 @ 提醒。"
+                    text += f"\n\n{footer}"
                 elif subscription_failures:
-                    text += (
-                        f"\n\n有 {subscription_failures} 场详情获取或订阅保存失败，"
+                    footer = (
+                        f"有 {subscription_failures} 场详情获取或订阅保存失败，"
                         "未建立提醒，请稍后重试。"
                     )
-                yield event.plain_result(text)
+                    text += f"\n\n{footer}"
+                yield await self._image_or_text(
+                    event,
+                    render_live_card,
+                    text,
+                    mine,
+                    footer=footer,
+                    log_name="直播卡片",
+                )
             else:
                 yield event.plain_result(
                     formatter.format_team_not_live(name, upcoming)
@@ -382,7 +440,28 @@ class HltvPlugin(Star):
                 logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
                 continue
             m.update(snapshot)
-        yield event.plain_result(formatter.format_live(data, note, delayed))
+        fallback = formatter.format_live(data, note, delayed)
+        if data:
+            delayed_note = f"另有 {len(delayed)} 场延迟或刚开打" if delayed else ""
+            yield await self._image_or_text(
+                event,
+                render_live_card,
+                fallback,
+                data,
+                note=note,
+                footer=delayed_note,
+                log_name="直播卡片",
+            )
+        else:
+            yield await self._image_or_text(
+                event,
+                render_matches_card,
+                fallback,
+                self._limit_items(delayed),
+                "延迟或刚开打",
+                subtitle="已过预定时间，HLTV 暂无直播比分",
+                log_name="延迟比赛卡片",
+            )
 
     @hltv.command("results", alias={"赛果", "结果"})
     async def results(self, event: AstrMessageEvent, days: int = 0):
@@ -397,7 +476,15 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(formatter.format_results(data, days, self.max_items))
+        fallback = formatter.format_results(data, days, self.max_items)
+        yield await self._image_or_text(
+            event,
+            render_results_card,
+            fallback,
+            self._limit_items(data),
+            f"近 {days} 天赛果",
+            log_name="赛果卡片",
+        )
 
     @hltv.command("ranking", alias={"排名", "排行"})
     async def ranking(self, event: AstrMessageEvent, kind: str = ""):
@@ -405,14 +492,14 @@ class HltvPlugin(Star):
         arg = kind.strip().lower()
         if arg in ("hltv", "h"):
             use_vrs, region = False, None
-            key, title = RANKING_HLTV_KEY, "🏆 HLTV 战队排名 Top50"
+            key, title = RANKING_HLTV_KEY, "HLTV 战队排名 Top50"
         elif arg in ("", "v", "vrs", "valve"):
             use_vrs, region = True, None
-            key, title = vrs_key(None), "🏆 Valve VRS 排名（全球）"
+            key, title = vrs_key(None), "Valve VRS 排名（全球）"
         elif arg in VRS_REGIONS:
             use_vrs, region = True, VRS_REGIONS[arg]
             key = vrs_key(region)
-            title = f"🏆 Valve VRS 排名（{_REGION_CN.get(region, region)}）"
+            title = f"Valve VRS 排名（{_REGION_CN.get(region, region)}）"
         else:
             yield event.plain_result(
                 "用法：/hltv ranking [地区|hltv]\n"
@@ -431,10 +518,16 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(
-            formatter.format_ranking(
-                data, self.max_items, title, show_region=(use_vrs and region is None)
-            )
+        show_region = use_vrs and region is None
+        fallback = formatter.format_ranking(data, self.max_items, title, show_region=show_region)
+        yield await self._image_or_text(
+            event,
+            render_ranking_card,
+            fallback,
+            self._limit_items(data),
+            title,
+            show_region=show_region,
+            log_name="排名卡片",
         )
 
     @hltv.command("events", alias={"赛事"})
@@ -447,7 +540,14 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(formatter.format_events(data, self.max_items))
+        fallback = formatter.format_events(data, self.max_items)
+        yield await self._image_or_text(
+            event,
+            render_events_card,
+            fallback,
+            self._limit_items(data),
+            log_name="赛事卡片",
+        )
 
     @hltv.command("team", alias={"战队"})
     async def team(self, event: AstrMessageEvent, name: str = ""):
@@ -463,12 +563,13 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        try:
-            card = await asyncio.to_thread(render_team_card, data)
-            yield event.image_result(str(card))
-        except Exception as e:
-            logger.warning(f"[hltv] 战队卡片渲染失败，回退文本: {e!r}")
-            yield event.plain_result(formatter.format_team(data))
+        yield await self._image_or_text(
+            event,
+            render_team_card,
+            formatter.format_team(data),
+            data,
+            log_name="战队卡片",
+        )
 
     @hltv.command("player", alias={"选手"})
     async def player(self, event: AstrMessageEvent, nickname: str = ""):
@@ -485,11 +586,16 @@ class HltvPlugin(Star):
             yield event.plain_result(str(e))
             return
         try:
-            card = await asyncio.to_thread(render_player_card, data)
-            yield event.image_result(str(card))
+            await self.client.prepare_player_assets(data)
         except Exception as e:
-            logger.warning(f"[hltv] 选手卡片渲染失败，回退文本: {e!r}")
-            yield event.plain_result(formatter.format_player(data))
+            logger.warning(f"[hltv] 官方奖杯图片缓存失败，使用内置徽章: {e!r}")
+        yield await self._image_or_text(
+            event,
+            render_player_card,
+            formatter.format_player(data),
+            data,
+            log_name="选手卡片",
+        )
 
     @hltv.command("news", alias={"新闻"})
     async def news(self, event: AstrMessageEvent, index: int = 0):
@@ -544,7 +650,14 @@ class HltvPlugin(Star):
                         it["title_zh"] = zh
                     else:
                         it.pop("title_zh", None)
-        yield event.plain_result(formatter.format_news(items, self.max_items))
+        fallback = formatter.format_news(items, self.max_items)
+        yield await self._image_or_text(
+            event,
+            render_news_card,
+            fallback,
+            shown,
+            log_name="新闻卡片",
+        )
 
     @staticmethod
     def _typo_hint(typo: str) -> str:

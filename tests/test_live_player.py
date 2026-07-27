@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from bs4 import BeautifulSoup
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageFont
 
 
 astrbot = types.ModuleType("astrbot")
@@ -22,7 +22,20 @@ from core.formatter import (
     format_match_finished,
     format_player,
 )
-from core.renderer import CARD_SIZE, render_player_card, render_team_card
+from core.renderer import (
+    BUNDLED_FONT,
+    BUNDLED_FONT_BOLD,
+    CARD_SIZE,
+    PLAYER_CARD_SIZE,
+    render_events_card,
+    render_live_card,
+    render_matches_card,
+    render_news_card,
+    render_player_card,
+    render_ranking_card,
+    render_results_card,
+    render_team_card,
+)
 from core.subscriptions import LiveSubscriptionStore, advance_subscription
 from core.translator import Translator
 
@@ -216,38 +229,156 @@ class LiveSubscriptionTests(unittest.TestCase):
         self.assertTrue(finished)
 
 
+class TeamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_100t_alias_selects_current_ranked_team(self):
+        client = HltvClient(cache_ttl=0)
+        selected = {}
+
+        async def top_teams(max_teams=50):
+            return [
+                {"id": "999", "title": "100 Thieves Academy"},
+                {"id": "777", "title": "100 Thieves"},
+            ]
+
+        async def details(team_id, title):
+            selected.update({"id": team_id, "title": title})
+            return selected
+
+        client.get_top_teams = top_teams
+        client.get_team_details = details
+
+        team = await client.find_team("100t")
+
+        self.assertEqual(team, {"id": "777", "title": "100 Thieves"})
+
+    def test_team_history_uses_real_opponent_score_and_result(self):
+        html = """
+        <h1 class="profile-team-name">100 Thieves</h1>
+        <div id="matchesBox"><table>
+          <tr class="team-row">
+            <td><span data-unix="1785081600000"></span></td>
+            <td><div class="team-flex lost"></div></td>
+            <td><a class="team-name">100 Thieves</a><a class="team-name">Spirit</a></td>
+            <td><span class="score">1</span><span class="score">2</span></td>
+          </tr>
+          <tr class="team-row">
+            <td><span data-unix="1784995200000"></span></td>
+            <td><div class="team-flex"></div></td>
+            <td><a class="team-name">100 Thieves</a><a class="team-name">MOUZ</a></td>
+            <td><span class="score">2</span><span class="score">0</span></td>
+          </tr>
+        </table></div>
+        """
+
+        team = HltvClient._parse_team_page(BeautifulSoup(html, "lxml"), "100 Thieves")
+
+        self.assertEqual(
+            [(item["opp"], item["score"], item["won"]) for item in team["recent"]],
+            [("Spirit", "1-2", False), ("MOUZ", "2-0", True)],
+        )
+
+
 class RendererTests(unittest.TestCase):
+    def test_bundled_fonts_include_chinese_ui_glyphs(self):
+        for path in (BUNDLED_FONT, BUNDLED_FONT_BOLD):
+            font = ImageFont.truetype(str(path), 32)
+            missing = bytes(font.getmask("\U0010ffff"))
+            for character in "战队档案选手冠军数据中心全球赛事Sørensen":
+                self.assertNotEqual(bytes(font.getmask(character)), missing, character)
+
     def test_team_and_player_cards_are_nonblank(self):
         team = {
-            "title": "100 Thieves Academy International",
+            "title": "Layout Stress Team International",
             "valve_rank": "18",
             "world_rank": "23",
             "age": "24.1",
             "players": [{"name": f"Player {index}", "cc": "CN"} for index in range(1, 7)],
             "coach": "Very Long Coach Name",
             "weeks_top30": "42",
-            "recent": [{"won": True, "opp": "Spirit", "score": "2:1"}],
-            "trophies": ["IEM Chengdu 2026"],
+            "recent": [
+                {"won": index % 2 == 0, "opp": f"Opponent {index}", "score": "2:1"}
+                for index in range(5)
+            ],
+            "trophies": [f"Championship {index}" for index in range(1, 7)],
         }
         player = {
-            "nickname": "donk",
-            "name": "Danil Kryshkovets",
-            "team": "Spirit",
-            "nationality": "Russia",
-            "age": "19",
-            "rating": "1.53",
+            "nickname": "ZywOo",
+            "name": "Mathieu Herbaut",
+            "team": "Vitality",
+            "nationality": "France",
+            "age": "25",
+            "rating": "1.33",
             "rating_label": "Rating 3.0",
-            "major_wins": 1,
-            "major_mvps": 1,
-            "total_trophies": 12,
-            "total_mvps": 11,
-            "top20": [{"year": 2024, "rank": 1}, {"year": 2025, "rank": 2}],
-            "championships": [{"name": "Shanghai Major 2024", "major": True}],
+            "major_wins": 3,
+            "major_mvps": 3,
+            "total_trophies": 27,
+            "total_mvps": 32,
+            "top20": [
+                {"year": 2019, "rank": 1},
+                {"year": 2020, "rank": 1},
+                {"year": 2021, "rank": 2},
+                {"year": 2022, "rank": 2},
+                {"year": 2023, "rank": 1},
+                {"year": 2024, "rank": 3},
+                {"year": 2025, "rank": 1},
+            ],
+            "championships": [
+                {"name": f"Championship Event {index}", "major": index == 4}
+                for index in range(1, 11)
+            ],
+            "mvp_events": [f"MVP Event {index}" for index in range(1, 9)],
         }
         with tempfile.TemporaryDirectory() as temp:
             paths = [
                 render_team_card(team, output_dir=Path(temp)),
                 render_player_card(player, output_dir=Path(temp)),
+            ]
+            for index, path in enumerate(paths):
+                with Image.open(path) as image:
+                    expected = CARD_SIZE if index == 0 else PLAYER_CARD_SIZE
+                    self.assertEqual(image.size, expected)
+                    flat = Image.new("RGB", image.size, image.getpixel((0, 0)))
+                    self.assertIsNotNone(ImageChops.difference(image, flat).getbbox())
+
+    def test_list_cards_are_nonblank(self):
+        matches = [
+            {
+                "date": "27-07-2026",
+                "time": "18:00",
+                "team1": f"Team Alpha {index}",
+                "team2": f"Team Beta {index}",
+                "event": "IEM Cologne Major 2026",
+                "rating": 4,
+                "current_map_name": "Ancient",
+                "current_score": "7:5",
+                "maps_score": "1:0",
+            }
+            for index in range(10)
+        ]
+        results = [
+            {**match, "score1": "2", "score2": "1"} for match in matches
+        ]
+        ranking = [
+            {"rank": index, "title": f"Ranked Team {index}", "points": 1000 - index, "region": "Europe"}
+            for index in range(1, 11)
+        ]
+        events = [
+            {"title": f"Event {index}", "start_date": "07-27", "end_date": "08-02"}
+            for index in range(1, 11)
+        ]
+        news = [
+            {"title_zh": f"这是一条用于测试长标题排版的 HLTV 新闻 {index}"}
+            for index in range(1, 11)
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            paths = [
+                render_matches_card(matches, "今日赛程", output_dir=output),
+                render_live_card(matches[:4], output_dir=output),
+                render_results_card(results, "近期赛果", output_dir=output),
+                render_ranking_card(ranking, "Valve VRS 排名", show_region=True, output_dir=output),
+                render_events_card(events, output_dir=output),
+                render_news_card(news, output_dir=output),
             ]
             for path in paths:
                 with Image.open(path) as image:
@@ -264,45 +395,49 @@ class TranslatorTests(unittest.TestCase):
 class PlayerTests(unittest.TestCase):
     HTML = """
     <div class="playerProfile">
-      <h1 class="playerNickname">donk</h1>
-      <div class="playerRealname"><img title="Russia"> Danil Kryshkovets</div>
-      <div class="playerInfoRow playerAge"><span class="listRight">19 years</span></div>
-      <div class="playerInfoRow playerTeam"><a href="/team/7020/spirit">Spirit</a></div>
+      <h1 class="playerNickname">ZywOo</h1>
+      <div class="playerRealname"><img title="France"> Mathieu Herbaut</div>
+      <div class="playerInfoRow playerAge"><span class="listRight">25 years</span></div>
+      <div class="playerInfoRow playerTeam"><a href="/team/9565/vitality">Vitality</a></div>
       <div class="playerInfoRow playerTop20"><span class="top20ListRight">
-        <a>#1</a><span class="top-20-year">('24)</span>
-        <a>#2</a><span class="top-20-year">('25)</span>
+        <a href="/news/31000/top-20-players-of-2020-zywoo-1">#1</a><span class="top-20-year">('20)</span>
+        <a href="/news/33000/top-20-players-of-2021-zywoo-2">#2</a><span class="top-20-year">('21)</span>
       </span></div>
       <div class="majorSection">
-        <div class="majorWinner"><b>1</b> x Major winner</div>
-        <div class="majorMVP"><b>1</b> x Major MVP</div>
+        <div class="majorWinner"><b>3</b> x Major winner</div>
+        <div class="majorMVP"><b>3</b> x Major MVP</div>
       </div>
       <div class="trophySection"><div class="trophyRow">
-        <div class="trophy"><div class="mvp-count">11</div></div>
-        <a class="trophy" href="/events/1/major"><span class="trophyDescription majorTrophy" title="Shanghai Major 2024"></span></a>
-        <a class="trophy" href="/events/2/iem"><span class="trophyDescription" title="IEM Katowice 2024"></span></a>
-        <a class="trophy" href="/news/3/top"><span class="trophyDescription" title="#1 best player in 24"></span></a>
+        <div class="trophy"><div class="trophyHolder"><span class="trophyDescription" title="MVP winner at:&#10;Paris Major 2023&#10;IEM Cologne 2024"><img src="/img/static/event/mvpOld.png"><div class="mvp-count">2</div></span></div></div>
+        <a class="trophy" href="/news/1/top"><div class="trophyHolder"><span class="trophyDescription" title="#1 best player in 19"><img src="/img/static/event/trophies/2019/1.png"></span></div></a>
+        <a class="trophy" href="/events/1/major"><div class="trophyHolder"><span class="trophyDescription majorTrophy" title="Paris Major 2023"><img src="/img/static/event/trophies/major.png"></span></div></a>
+        <a class="trophy" href="/events/2/iem"><div class="trophyHolder"><span class="trophyDescription" title="IEM Cologne 2024"><img src="https://img-cdn.hltv.org/eventtrophy/test.png"></span></div></a>
       </div></div>
       <div class="playerpage-container"><div class="player-stat">
-        <b>Rating 3.0</b><span class="statsVal"><p>1.53</p></span>
+        <b>Rating 3.0</b><span class="statsVal"><p>1.33</p></span>
       </div></div>
     </div>
     """
 
     def test_player_honors_are_parsed_and_formatted(self):
         page = BeautifulSoup(self.HTML, "lxml")
-        player = HltvClient._parse_player_page(page, 21167, "donk")
+        player = HltvClient._parse_player_page(page, 11893, "ZywOo")
 
-        self.assertEqual(player["top20"], [{"year": 2024, "rank": 1}, {"year": 2025, "rank": 2}])
-        self.assertEqual(player["major_wins"], 1)
-        self.assertEqual(player["major_mvps"], 1)
+        self.assertEqual(
+            [(item["year"], item["rank"]) for item in player["top20"]],
+            [(2019, 1), (2020, 1), (2021, 2)],
+        )
+        self.assertEqual(player["major_wins"], 3)
+        self.assertEqual(player["major_mvps"], 3)
         self.assertEqual(player["total_trophies"], 2)
-        self.assertEqual(player["total_mvps"], 11)
+        self.assertEqual(player["total_mvps"], 2)
+        self.assertEqual(player["mvp_events"], ["Paris Major 2023", "IEM Cologne 2024"])
 
         text = format_player(player)
-        self.assertIn("HLTV TOP20：2024 #1、2025 #2", text)
-        self.assertIn("Major 1 冠（1 次 MVP）", text)
+        self.assertIn("HLTV TOP20：2019 #1、2020 #1、2021 #2", text)
+        self.assertIn("Major 3 冠（3 次 MVP）", text)
         self.assertIn("赛事冠军 2 次", text)
-        self.assertIn("最近冠军：Shanghai Major 2024、IEM Katowice 2024", text)
+        self.assertIn("最近冠军：Paris Major 2023、IEM Cologne 2024", text)
 
 
 if __name__ == "__main__":

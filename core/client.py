@@ -15,12 +15,14 @@
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Awaitable, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 import aiohttp
 
@@ -678,23 +680,64 @@ class HltvClient:
 
     async def find_team(self, name: str) -> dict:
         """查战队：先在 HLTV 排名 Top50 内模糊匹配，找不到走站内搜索。"""
-        needle = name.strip().lower()
+        needle = self._normalize_name(name)
         try:
             teams = await self.get_top_teams(50)
         except HltvError:
             teams = []
-        matched = next(
-            (t for t in teams if needle in str(t.get("title", "")).lower()), None
+        candidates = [
+            t
+            for t in teams
+            if needle
+            and (
+                needle in self._normalize_name(t.get("title", ""))
+                or self._normalize_name(t.get("title", "")) in needle
+            )
+        ]
+        matched = (
+            min(
+                candidates,
+                key=lambda item: self._name_match_score(
+                    needle, item.get("title") or ""
+                ),
+            )
+            if candidates
+            else None
         )
         if matched and matched.get("id"):
             team_id, title = matched["id"], matched.get("title") or name
         else:
-            found = (await self._search(name)).get("teams") or []
-            if not found or not isinstance(found[0], dict) or "id" not in found[0]:
+            found = [
+                item
+                for item in ((await self._search(name)).get("teams") or [])
+                if isinstance(item, dict) and "id" in item
+            ]
+            if not found:
                 raise HltvError(f"没有找到战队「{name}」。")
-            team_id = found[0]["id"]
-            title = found[0].get("name") or found[0].get("title") or name
+            best = min(
+                found,
+                key=lambda item: self._name_match_score(
+                    needle, item.get("name") or item.get("title") or ""
+                ),
+            )
+            team_id = best["id"]
+            title = best.get("name") or best.get("title") or name
         return await self.get_team_details(team_id, str(title))
+
+    @staticmethod
+    def _normalize_name(value: Any) -> str:
+        return re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(value).lower())
+
+    @classmethod
+    def _name_match_score(cls, needle: str, candidate: Any) -> tuple[int, int]:
+        normalized = cls._normalize_name(candidate)
+        if normalized == needle:
+            return (0, len(normalized))
+        if normalized.startswith(needle):
+            return (1, len(normalized))
+        if needle in normalized:
+            return (2, len(normalized))
+        return (3, len(normalized))
 
     async def get_team_details(self, team_id: Any, title: str) -> dict:
         async def fetch() -> dict:
@@ -820,7 +863,7 @@ class HltvClient:
 
     @staticmethod
     def _parse_player_page(page: Any, player_id: Any, nickname: str) -> dict:
-        """解析选手资料、年度 Top20、Major 与赛事冠军。"""
+        """解析选手资料，并按 HLTV 当前 trophyHolder 结构拆分各类荣誉。"""
         info: dict[str, Any] = {
             "id": player_id,
             "nickname": nickname,
@@ -835,8 +878,11 @@ class HltvClient:
             "major_wins": 0,
             "major_mvps": 0,
             "championships": [],
+            "career_awards": [],
             "total_trophies": 0,
             "total_mvps": 0,
+            "mvp_events": [],
+            "mvp_icon_url": "",
         }
 
         nick_el = page.find("h1", class_="playerNickname")
@@ -873,6 +919,7 @@ class HltvClient:
             info["rating"] = value_el.get_text(" ", strip=True) if value_el else ""
             break
 
+        top20_by_year: dict[int, dict[str, Any]] = {}
         for rank_el in page.select(".playerTop20 .top20ListRight a"):
             rank_match = re.search(r"#(\d+)", rank_el.get_text(" ", strip=True))
             year_el = rank_el.find_next_sibling("span", class_="top-20-year")
@@ -881,12 +928,17 @@ class HltvClient:
                 if year_el is not None
                 else None
             )
-            if not rank_match or not year_match:
+            if year_match is None:
+                year_match = re.search(
+                    r"top-20-players-of-(\d{4})", str(rank_el.get("href") or "")
+                )
+            if not rank_match or year_match is None:
                 continue
             year = int(year_match.group())
             if year < 100:
                 year += 2000
-            info["top20"].append({"year": year, "rank": int(rank_match.group(1))})
+            rank = int(rank_match.group(1))
+            top20_by_year[year] = {"year": year, "rank": rank}
 
         def count(selector: str) -> int:
             el = page.select_one(selector)
@@ -897,18 +949,140 @@ class HltvClient:
         info["major_mvps"] = count(".majorSection .majorMVP")
         info["total_mvps"] = count(".trophySection .mvp-count")
 
-        for trophy in page.select(".trophySection a.trophy[href^='/events/']"):
-            desc = trophy.select_one(".trophyDescription")
-            name = str(desc.get("title") or "").strip() if desc else ""
-            if name:
+        for holder in page.select(".trophySection .trophyHolder"):
+            desc = holder.select_one(".trophyDescription")
+            if desc is None:
+                continue
+            title = str(desc.get("title") or "").strip()
+            image = holder.select_one("img[src]")
+            icon_url = HltvClient._asset_url(image.get("src") if image else "")
+
+            mvp_count = holder.select_one(".mvp-count")
+            if mvp_count is not None:
+                lines = [line.strip() for line in title.splitlines() if line.strip()]
+                info["mvp_events"] = (
+                    lines[1:]
+                    if lines and lines[0].lower().startswith("mvp")
+                    else lines
+                )
+                info["mvp_icon_url"] = icon_url
+                continue
+
+            top_match = re.search(
+                r"#(\d+)\s+best player in\s+(\d{2,4})", title, re.IGNORECASE
+            )
+            if top_match:
+                rank, year = int(top_match.group(1)), int(top_match.group(2))
+                if year < 100:
+                    year += 2000
+                item = top20_by_year.setdefault(year, {"year": year, "rank": rank})
+                item["rank"] = rank
+                if icon_url:
+                    item["icon_url"] = icon_url
+                continue
+
+            link = holder.find_parent(
+                "a", href=lambda value: value and value.startswith("/events/")
+            )
+            if link is not None and title:
                 info["championships"].append(
                     {
-                        "name": name,
+                        "name": title,
                         "major": "majorTrophy" in (desc.get("class") or []),
+                        "icon_url": icon_url,
                     }
                 )
+                continue
+
+            if title and "/img/static/award/" in icon_url:
+                year_el = holder.select_one(".award-year")
+                info["career_awards"].append(
+                    {
+                        "name": title,
+                        "year": (
+                            year_el.get_text(" ", strip=True).lstrip("'")
+                            if year_el
+                            else ""
+                        ),
+                        "icon_url": icon_url,
+                    }
+                )
+
+        for year, item in top20_by_year.items():
+            item.setdefault(
+                "icon_url",
+                f"https://www.hltv.org/img/static/event/trophies/{year}/{item['rank']}.png",
+            )
+        info["top20"] = [top20_by_year[year] for year in sorted(top20_by_year)]
+        if not info["total_mvps"]:
+            info["total_mvps"] = len(info["mvp_events"])
         info["total_trophies"] = len(info["championships"])
         return info
+
+    @staticmethod
+    def _asset_url(src: Any) -> str:
+        value = str(src or "").strip()
+        return urljoin("https://www.hltv.org/", value) if value else ""
+
+    async def prepare_player_assets(self, player: dict) -> dict:
+        """Best-effort cache of the official TOP/MVP icons used by the card."""
+        references: list[tuple[dict, str]] = [
+            (item, "icon_path")
+            for item in player.get("top20") or []
+            if item.get("icon_url")
+        ]
+        if player.get("mvp_icon_url"):
+            references.append((player, "mvp_icon_path"))
+        if not references:
+            return player
+
+        cache_dir = Path.home() / ".astrbot_plugin_hltv" / "media"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        timeout = aiohttp.ClientTimeout(total=min(self._timeout, 6))
+        proxy = self._proxy_list[0] if self._proxy_list else None
+
+        async def download(
+            session: aiohttp.ClientSession, target: dict, path_key: str
+        ) -> None:
+            url_key = "mvp_icon_url" if path_key == "mvp_icon_path" else "icon_url"
+            url = str(target.get(url_key) or "")
+            parsed = urlparse(url)
+            if parsed.scheme != "https" or parsed.hostname not in {
+                "www.hltv.org",
+                "img-cdn.hltv.org",
+            }:
+                return
+            suffix = Path(parsed.path).suffix.lower()
+            if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                suffix = ".png"
+            destination = cache_dir / f"{hashlib.sha256(url.encode()).hexdigest()}{suffix}"
+            if destination.is_file() and destination.stat().st_size > 0:
+                target[path_key] = str(destination)
+                return
+            try:
+                async with session.get(url, proxy=proxy) as response:
+                    if response.status != 200:
+                        return
+                    body = await response.read()
+                is_image = body.startswith((b"\x89PNG", b"\xff\xd8\xff")) or (
+                    body.startswith(b"RIFF") and body[8:12] == b"WEBP"
+                )
+                if not body or len(body) > 2 * 1024 * 1024 or not is_image:
+                    return
+                destination.write_bytes(body)
+                target[path_key] = str(destination)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                return
+
+        headers = {
+            **_BROWSER_HEADERS,
+            "accept": "image/avif,image/webp,image/png,image/*",
+        }
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            await asyncio.gather(
+                *(download(session, target, path_key) for target, path_key in references)
+            )
+        return player
 
     async def get_player_details(self, player_id: Any, nickname: str) -> dict:
         async def fetch() -> dict:

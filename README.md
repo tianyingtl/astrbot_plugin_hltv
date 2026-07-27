@@ -6,19 +6,19 @@ AstrBot 插件：在聊天里查询 [HLTV](https://www.hltv.org/)（CS2 赛事�
 
 | 指令 | 说明 |
 | --- | --- |
-| `/hltv today` | 今日赛程（直播中优先；过滤后为空时自动回退显示全部） |
-| `/hltv matches [天数]` | 近期大赛（默认 1 天，上限 7 天；星级门槛见配置） |
-| `/hltv live` | 正在进行的比赛；每场独立分区，小局比分在上、大局比分在下 |
+| `/hltv today` | 今日赛程图片卡（直播中优先；过滤后为空时自动回退显示全部） |
+| `/hltv matches [天数]` | 近期大赛图片卡（默认 1 天，上限 7 天；星级门槛见配置） |
+| `/hltv live` | 直播图片卡；每场独立分区，小局比分在上、大局比分在下 |
 | `/hltv live <队名>` | 只看该队并自动订阅（如 `100t`）；新地图/完赛时自动 @，完赛附 Rating |
 | `/hltv live 取消` | 取消当前账号在本会话的全部直播提醒 |
-| `/hltv results [天数]` | 近期赛果（不做星级过滤） |
-| `/hltv ranking` | **Valve VRS 排名**（默认全球，V社积分） |
+| `/hltv results [天数]` | 近期赛果图片卡（不做星级过滤） |
+| `/hltv ranking` | **Valve VRS 排名图片卡**（默认全球，V社积分） |
 | `/hltv ranking asia\|europe\|americas` | 地区 VRS 排名（可用中文：亚洲/欧洲/美洲） |
 | `/hltv ranking hltv` | HLTV 自家世界排名 |
-| `/hltv events` | 近期赛事 |
+| `/hltv events` | 近期赛事图片卡 |
 | `/hltv team <名称>` | 战队图片卡：VRS/HLTV 双排名、阵容、教练、年龄、奖杯、近期战绩 |
-| `/hltv player <昵称>` | 选手图片卡：Rating、HLTV TOP20、Major、赛事冠军与 MVP |
-| `/hltv news` | 今日新闻（编号列表，自动中文翻译） |
+| `/hltv player <昵称>` | 选手图片卡：Rating、官方 TOP 奖杯、Major、赛事冠军与 MVP 赛事 |
+| `/hltv news` | 今日新闻图片卡（编号列表，自动中文翻译） |
 | `/hltv news <序号>` | 新闻详情（正文摘要+翻译+原文链接） |
 | `/hltv sub` / `unsub` | 在本会话订阅/退订每日赛程推送 |
 | `/hltv help` | 帮助 |
@@ -58,7 +58,7 @@ main.py             指令层：/hltv 指令组、参数解析、翻译/推送�
 core/client.py      数据层：自建解析器 + hltv-async-api 混合；
                     TTL 缓存 + 全局锁串行化（30s 排队超时快速失败）
 core/formatter.py   展示层：数据 → 文本；防御式取值 + 哨兵值归一化
-core/renderer.py    图片层：Pillow 渲染 1200x760 战队/选手卡片
+core/renderer.py    图片层：Pillow 渲染 1600px 全幅半透明查询卡片
 core/subscriptions.py 状态层：直播提醒 JSON 持久化、地图/完赛状态流转
 core/translator.py  微软翻译（免费 Edge 通道，失败回退原文）
 ```
@@ -74,7 +74,7 @@ core/translator.py  微软翻译（免费 Edge 通道，失败回退原文）
 | 新闻 | **自建解析** | 保留完整文章链接供详情查看、不丢头条；Edge 认证后批量翻译中文 |
 | 单场比赛 | **自建解析** | 读取当前地图、系列赛比分与完赛 Rating 3.0，供直播提醒复用 |
 | results / events | 库 | 实测选择器健在 |
-| player | **自建解析** | 展示年度 TOP20、Major、赛事冠军与 MVP；库的旧统计选择器已失效 |
+| player | **自建解析** | 按 trophyHolder 拆分 TOP20、Major、赛事冠军、年度奖项与 MVP；库的旧统计选择器已失效 |
 | 传输层 | 库 `_fetch` | 统一复用其重试/代理轮换/Cloudflare 检测 |
 
 ## 已知限制
@@ -89,6 +89,8 @@ core/translator.py  微软翻译（免费 Edge 通道，失败回退原文）
 4. 翻译走微软 Edge 免费通道，无需配 key；接口失效时自动显示英文原文。
 5. 直播提醒保存在 `~/.astrbot_plugin_hltv/live_subscriptions.json`，插件重载后继续；
    每条提醒最长保留 12 小时，完赛后自动移除。
+6. 图片卡内置 OFL 常用中文与多语种字体子集，不依赖 AstrBot 服务器安装系统中文字库；
+   字体许可见 `assets/fonts/OFL.txt`。官方 TOP/MVP 图片下载失败时会使用内置徽章。
 
 ## 开发
 
