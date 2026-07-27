@@ -617,25 +617,27 @@ class HltvPlugin(Star):
                 "description": description,
             }
             image = result.get("image_path")
-            if image:
-                image_message = event.image_result(str(image))
-            else:
-                image_message = await self._image_or_text(
-                    event,
-                    render_top20_player_card,
-                    "TOP20 个人图片生成失败，请通过新闻原文查看。",
-                    card_data,
-                    log_name="TOP20 个人卡片",
-                )
-            yield event.plain_result(
-                formatter.format_news_detail(
-                    title,
-                    [description] if description else [],
-                    str(result.get("url") or ""),
-                    original_title=original_title,
-                )
+            if not image:
+                try:
+                    image = await asyncio.to_thread(
+                        render_top20_player_card, card_data
+                    )
+                except Exception as e:
+                    logger.warning(f"[hltv] TOP20 个人卡片渲染失败，回退文本: {e!r}")
+
+            news_text = formatter.format_news_detail(
+                title,
+                [description] if description else [],
+                str(result.get("url") or ""),
+                original_title=original_title,
             )
-            yield image_message
+            if image:
+                chain = MessageChain().message(news_text).file_image(str(image))
+                yield event.chain_result(chain.chain)
+            else:
+                yield event.plain_result(
+                    news_text + "\n\nTOP20 个人图片生成失败，请通过新闻原文查看。"
+                )
             return
 
         try:
