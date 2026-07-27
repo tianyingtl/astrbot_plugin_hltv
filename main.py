@@ -25,6 +25,7 @@ from .core.client import (
     MATCHES_RAW_KEY,
     NEWS_KEY,
     RANKING_HLTV_KEY,
+    TOP20_MIN_YEAR,
     VRS_REGIONS,
     HltvClient,
     HltvError,
@@ -58,6 +59,7 @@ _KNOWN_SUBCOMMANDS = {
     "live", "直播",
     "results", "赛果", "结果",
     "ranking", "排名", "排行",
+    "top20", "年度榜单",
     "events", "赛事",
     "team", "战队",
     "player", "选手",
@@ -549,6 +551,35 @@ class HltvPlugin(Star):
             log_name="赛事卡片",
         )
 
+    @hltv.command("top20", alias={"年度榜单"})
+    async def top20(self, event: AstrMessageEvent, year: str = ""):
+        """HLTV 年度 TOP20 官方总图；默认上一年。"""
+        latest = self.client.latest_top20_year()
+        raw_year = str(year or "").strip()
+        if raw_year:
+            try:
+                selected = int(raw_year)
+            except ValueError:
+                yield event.plain_result(
+                    "用法：/hltv top20 [年份]，例如 /hltv top20 2023"
+                )
+                return
+        else:
+            selected = latest
+        if selected < TOP20_MIN_YEAR or selected > latest:
+            yield event.plain_result(
+                f"TOP20 年份范围为 {TOP20_MIN_YEAR}-{latest}；不填年份默认查询 {latest}。"
+            )
+            return
+        if tip := self._waiting_tip(event, f"top20:{selected}"):
+            yield tip
+        try:
+            image = await self.client.get_top20_image(selected)
+        except HltvError as e:
+            yield event.plain_result(str(e))
+            return
+        yield event.image_result(str(image))
+
     @hltv.command("team", alias={"战队"})
     async def team(self, event: AstrMessageEvent, name: str = ""):
         """战队信息，任意战队"""
@@ -619,7 +650,8 @@ class HltvPlugin(Star):
             except HltvError as e:
                 yield event.plain_result(str(e))
                 return
-            title = detail.get("title") or item.get("title") or ""
+            original_title = detail.get("title") or item.get("title") or ""
+            title = original_title
             paras = list(detail.get("paragraphs") or [])
             if not paras and item.get("desc"):
                 paras = [str(item["desc"])]
@@ -627,7 +659,9 @@ class HltvPlugin(Star):
                 translated = await self._translate_to_chinese([title] + paras)
                 title, paras = translated[0], translated[1:]
             yield event.plain_result(
-                formatter.format_news_detail(title, paras, item["url"])
+                formatter.format_news_detail(
+                    title, paras, item["url"], original_title=original_title
+                )
             )
             return
         # 列表：只翻译将要展示的条目，且缓存过的不重复翻译
@@ -694,6 +728,8 @@ class HltvPlugin(Star):
             handler = self.results(event, days=_int_arg())
         elif sub in ("ranking", "排名", "排行"):
             handler = self.ranking(event, kind=args[0] if args else "")
+        elif sub in ("top20", "年度榜单"):
+            handler = self.top20(event, year=args[0] if args else "")
         elif sub in ("events", "赛事"):
             handler = self.events(event)
         elif sub in ("team", "战队"):

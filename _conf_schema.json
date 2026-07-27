@@ -12,7 +12,7 @@
     "default": []
   },
   "translate_news": {
-    "description": "将新闻标题和详情翻译成中文（微软翻译免费接口）",
+    "description": "将新闻标题和详情翻译成中文，标题同时保留英文原题（微软翻译免费接口）",
     "type": "bool",
     "default": true
   },

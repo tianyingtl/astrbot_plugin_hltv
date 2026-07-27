@@ -393,6 +393,15 @@ def format_player(player: dict) -> str:
 # ---------------------------------------------------------------- 新闻
 
 
+def news_titles(item: dict) -> tuple[str, str]:
+    """返回主标题和英文原题；翻译缺失或相同时不重复显示。"""
+    source = str(item.get("title") or "").strip()
+    translated = str(item.get("title_zh") or "").strip()
+    if translated and source and translated.casefold() != source.casefold():
+        return translated, source
+    return translated or source or "?", ""
+
+
 def format_news(items: list[dict], max_items: int) -> str:
     if not items:
         return "📰 今天还没有新闻。"
@@ -400,14 +409,23 @@ def format_news(items: list[dict], max_items: int) -> str:
     lines = ["📰 HLTV 今日新闻"]
     for i, it in enumerate(shown, start=1):
         tag = "🔥" if it.get("featured") else ""
-        title = _val(it.get("title_zh") or it.get("title"), "?")
+        title, source = news_titles(it)
         lines.append(f"{i}. {tag}{title}")
+        if source:
+            lines.append(f"   EN: {source}")
     lines.append("👉 发送 /hltv news 序号 查看详情")
     return "\n".join(lines) + _omitted_line(omitted)
 
 
-def format_news_detail(title: str, paragraphs: list[str], url: str) -> str:
-    lines = [f"📰 {title}" if title else "📰 新闻详情"]
+def format_news_detail(
+    title: str, paragraphs: list[str], url: str, original_title: str = ""
+) -> str:
+    display_title, source = news_titles(
+        {"title_zh": title, "title": original_title}
+    )
+    lines = [f"📰 {display_title}" if display_title != "?" else "📰 新闻详情"]
+    if source:
+        lines.append(f"EN: {source}")
     if paragraphs:
         lines.append("")
         lines.extend(paragraphs)
@@ -425,10 +443,11 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名
 /hltv ranking hltv — HLTV 自家排名
+/hltv top20 [年份] — HLTV 年度 TOP20 官方总图（默认上一年）
 /hltv events — 近期赛事
 /hltv team <名称> — 战队详情图片卡（任意战队，支持空格）
 /hltv player <昵称> — 选手生涯荣誉图片卡
-/hltv news [序号] — 今日新闻（带序号看详情，自动翻译）
+/hltv news [序号] — 今日新闻（中英双语标题，带序号看详情）
 /hltv sub — 在本会话订阅每日赛程推送（unsub 退订）
 /hltv help — 显示本帮助
 所有子指令均可用中文，如：

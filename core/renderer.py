@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import random
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -9,11 +10,20 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
+from .formatter import news_titles
+
 
 ROOT = Path(__file__).resolve().parent.parent
 WIDE_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_wide.png"
 SMILE_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_smile.jpg"
 PORTRAIT_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_portrait.jpg"
+CARD_BASE_BACKGROUND = ROOT / "assets" / "card_base.png"
+BACKGROUND_POOL = (
+    WIDE_BACKGROUND,
+    SMILE_BACKGROUND,
+    PORTRAIT_BACKGROUND,
+    CARD_BASE_BACKGROUND,
+)
 DEFAULT_OUTPUT_DIR = Path.home() / ".astrbot_plugin_hltv" / "cards"
 BUNDLED_FONT = ROOT / "assets" / "fonts" / "HLTVCardSans-Regular.otf"
 BUNDLED_FONT_BOLD = ROOT / "assets" / "fonts" / "HLTVCardSans-Bold.otf"
@@ -30,6 +40,12 @@ BAD = (239, 137, 151, 255)
 
 class RenderError(Exception):
     pass
+
+
+def _pick_background(background_path: Path | None) -> Path:
+    if background_path is not None:
+        return Path(background_path)
+    return random.choice(BACKGROUND_POOL)
 
 
 def _font_candidates(bold: bool) -> list[Path | str]:
@@ -262,10 +278,10 @@ def _safe_name(value: Any) -> str:
 def render_team_card(
     team: dict,
     *,
-    background_path: Path = WIDE_BACKGROUND,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(background_path)
+    canvas, draw = _base_canvas(_pick_background(background_path))
     title = str(team.get("title") or "Unknown Team")
     _label(draw, (98, 69), "HLTV / 战队档案")
     title_font = _fit_font(draw, title, 84, 1200, bold=True, minimum=48)
@@ -351,11 +367,11 @@ def render_team_card(
 def render_player_card(
     player: dict,
     *,
-    background_path: Path = SMILE_BACKGROUND,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
     canvas, draw = _base_canvas(
-        background_path, PLAYER_CARD_SIZE, centering=(0.5, 0.38)
+        _pick_background(background_path), PLAYER_CARD_SIZE, centering=(0.5, 0.38)
     )
     nickname = str(player.get("nickname") or "Unknown Player")
     _label(draw, (98, 69), "HLTV / 选手档案")
@@ -519,10 +535,10 @@ def render_matches_card(
     title: str,
     *,
     subtitle: str = "",
-    background_path: Path = WIDE_BACKGROUND,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(background_path)
+    canvas, draw = _base_canvas(_pick_background(background_path))
     _section_header(draw, title, subtitle)
     shown = list(matches)[:10]
     if not shown:
@@ -563,10 +579,10 @@ def render_live_card(
     *,
     note: str = "",
     footer: str = "",
-    background_path: Path = WIDE_BACKGROUND,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(background_path)
+    canvas, draw = _base_canvas(_pick_background(background_path))
     _section_header(draw, "LIVE CENTER", note or f"{len(matches)} 场比赛进行中")
     shown = list(matches)[:4]
     if not shown:
@@ -622,10 +638,10 @@ def render_results_card(
     results: list[dict],
     title: str,
     *,
-    background_path: Path = WIDE_BACKGROUND,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(background_path)
+    canvas, draw = _base_canvas(_pick_background(background_path))
     _section_header(draw, title, f"共 {len(results)} 场已结束比赛")
     shown = list(results)[:10]
     if not shown:
@@ -656,10 +672,10 @@ def render_ranking_card(
     title: str,
     *,
     show_region: bool = False,
-    background_path: Path = WIDE_BACKGROUND,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(background_path)
+    canvas, draw = _base_canvas(_pick_background(background_path))
     _section_header(draw, title, f"展示前 {min(len(teams), 10)} 名")
     shown = list(teams)[:10]
     if not shown:
@@ -687,10 +703,12 @@ def render_ranking_card(
 def render_events_card(
     events: list[dict],
     *,
-    background_path: Path = PORTRAIT_BACKGROUND,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(background_path, centering=(0.5, 0.35))
+    canvas, draw = _base_canvas(
+        _pick_background(background_path), centering=(0.5, 0.35)
+    )
     _section_header(draw, "近期赛事", f"展示 {min(len(events), 10)} 项")
     shown = list(events)[:10]
     if not shown:
@@ -712,28 +730,40 @@ def render_events_card(
 def render_news_card(
     items: list[dict],
     *,
-    background_path: Path = SMILE_BACKGROUND,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(background_path, centering=(0.5, 0.35))
+    canvas, draw = _base_canvas(
+        _pick_background(background_path), centering=(0.5, 0.35)
+    )
     _section_header(draw, "HLTV 今日新闻", f"展示 {min(len(items), 10)} 条，使用 /hltv news 序号查看详情")
     shown = list(items)[:10]
     if not shown:
         draw.text((72, 330), "今天还没有新闻", font=_font(34, True), fill=MUTED)
-    title_font = _font(25, True)
     for index, item in enumerate(shown):
         col, row = index // 5, index % 5
         x, y = 72 + col * 748, 292 + row * 132
         if row:
             draw.line((x, y - 14, x + 680, y - 14), fill=LINE, width=1)
         draw.text((x, y + 8), f"{index + 1:02d}", font=_font(21, True), fill=ACCENT)
-        title = str(item.get("title_zh") or item.get("title") or "?")
+        title, source = news_titles(item)
+        title_font = _font(23 if source else 25, True)
+        line_gap = 30 if source else 34
         for line_index, line in enumerate(_wrap_text(draw, title, title_font, 610, 2)):
             draw.text(
-                (x + 60, y + 3 + line_index * 34),
+                (x + 60, y + 3 + line_index * line_gap),
                 line,
                 font=title_font,
                 fill=INK,
+            )
+        if source:
+            source_font = _font(18)
+            source_width = 560 if item.get("featured") else 610
+            draw.text(
+                (x + 60, y + 75),
+                _ellipsize(draw, source, source_font, source_width),
+                font=source_font,
+                fill=MUTED,
             )
         if item.get("featured"):
             draw.rectangle((x + 644, y + 92, x + 680, y + 98), fill=ACCENT)

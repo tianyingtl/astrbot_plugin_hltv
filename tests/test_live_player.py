@@ -3,6 +3,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from bs4 import BeautifulSoup
 from PIL import Image, ImageChops, ImageFont
@@ -20,13 +21,20 @@ from core.formatter import (
     format_live,
     format_map_started,
     format_match_finished,
+    format_news,
+    format_news_detail,
     format_player,
+    news_titles,
 )
 from core.renderer import (
+    BACKGROUND_POOL,
     BUNDLED_FONT,
     BUNDLED_FONT_BOLD,
+    CARD_BASE_BACKGROUND,
     CARD_SIZE,
     PLAYER_CARD_SIZE,
+    WIDE_BACKGROUND,
+    _pick_background,
     render_events_card,
     render_live_card,
     render_matches_card,
@@ -70,6 +78,87 @@ class LiveFormatTests(unittest.TestCase):
         self.assertIn("当前地图暂未同步", text)
         self.assertIn("大局  100 Thieves vs Spirit  ·  比分暂未同步", text)
         self.assertNotIn("0:0", text)
+
+
+class NewsTitleTests(unittest.TestCase):
+    def test_news_keeps_chinese_and_english_titles(self):
+        item = {
+            "title": "Spirit complete a flawless series",
+            "title_zh": "Spirit 完成零失误系列赛",
+            "featured": True,
+        }
+
+        self.assertEqual(
+            news_titles(item),
+            ("Spirit 完成零失误系列赛", "Spirit complete a flawless series"),
+        )
+        listing = format_news([item], 10)
+        detail = format_news_detail(
+            item["title_zh"],
+            ["正文"],
+            "https://www.hltv.org/news/1/example",
+            original_title=item["title"],
+        )
+        self.assertLess(listing.index(item["title_zh"]), listing.index(item["title"]))
+        self.assertIn(f"EN: {item['title']}", listing)
+        self.assertIn(f"EN: {item['title']}", detail)
+
+    def test_failed_translation_does_not_duplicate_english_title(self):
+        title = "Translation service unavailable"
+        item = {"title": title, "title_zh": title}
+
+        self.assertEqual(news_titles(item), (title, ""))
+        self.assertEqual(format_news([item], 10).count(title), 1)
+
+
+class Top20Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_top20_archive_and_official_image_are_resolved(self):
+        archive = BeautifulSoup(
+            """
+            <a href="/news/40000/unrelated">Other news</a>
+            <a href="/news/40002/top-20-players-of-2023-final-three-to-be-unveiled">
+              Top 20 players of 2023: final three to be unveiled
+            </a>
+            <a href="/news/40001/top-20-players-of-2023-final-list">
+              Top 20 players of 2023: final list
+            </a>
+            """,
+            "lxml",
+        )
+        article = BeautifulSoup(
+            """
+            <meta property="og:image" content="https://img-cdn.hltv.org/gallerypicture/cover.jpg">
+            <article class="newsitem">
+              <img src="/img/static/flags/30x20/DK.gif" class="flag">
+              <figure>
+                <img data-src="https://img-cdn.hltv.org/gallerypicture/top20-2023.png"
+                     alt="Top 20 players of 2023 final ranking">
+              </figure>
+            </article>
+            """,
+            "lxml",
+        )
+        expected = Path("D:/temp222/top20_2023.png")
+        client = HltvClient(cache_ttl=300)
+        client._fetch_raw = AsyncMock(side_effect=[archive, article])
+        client._download_top20_image = AsyncMock(return_value=expected)
+
+        result = await client.get_top20_image(2023)
+
+        self.assertEqual(result, expected)
+        self.assertEqual(
+            client._parse_top20_article_url(archive, 2023),
+            "https://www.hltv.org/news/40001/top-20-players-of-2023-final-list",
+        )
+        self.assertEqual(
+            client._parse_top20_image_url(article, 2023),
+            "https://img-cdn.hltv.org/gallerypicture/top20-2023.png",
+        )
+        client._download_top20_image.assert_awaited_once_with(
+            "https://img-cdn.hltv.org/gallerypicture/top20-2023.png",
+            2023,
+            referer="https://www.hltv.org/news/40001/top-20-players-of-2023-final-list",
+        )
 
 
 class MatchSnapshotTests(unittest.TestCase):
@@ -279,6 +368,14 @@ class TeamTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RendererTests(unittest.TestCase):
+    def test_all_four_user_backgrounds_are_randomized(self):
+        self.assertEqual(len(BACKGROUND_POOL), 4)
+        self.assertTrue(all(path.is_file() for path in BACKGROUND_POOL))
+        with patch("core.renderer.random.choice", return_value=CARD_BASE_BACKGROUND) as choose:
+            self.assertEqual(_pick_background(None), CARD_BASE_BACKGROUND)
+            choose.assert_called_once_with(BACKGROUND_POOL)
+        self.assertEqual(_pick_background(WIDE_BACKGROUND), WIDE_BACKGROUND)
+
     def test_bundled_fonts_include_chinese_ui_glyphs(self):
         for path in (BUNDLED_FONT, BUNDLED_FONT_BOLD):
             font = ImageFont.truetype(str(path), 32)
@@ -367,7 +464,10 @@ class RendererTests(unittest.TestCase):
             for index in range(1, 11)
         ]
         news = [
-            {"title_zh": f"这是一条用于测试长标题排版的 HLTV 新闻 {index}"}
+            {
+                "title": f"An English HLTV headline used to test bilingual layout {index}",
+                "title_zh": f"这是一条用于测试双语标题排版的 HLTV 新闻 {index}",
+            }
             for index in range(1, 11)
         ]
         with tempfile.TemporaryDirectory() as temp:

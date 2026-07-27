@@ -89,6 +89,7 @@ MATCHES_RAW_KEY = "matches_raw"
 RANKING_HLTV_KEY = "ranking:hltv:50"
 EVENTS_KEY = "events"
 NEWS_KEY = "news"
+TOP20_MIN_YEAR = 2010
 
 
 def results_key(days: int, min_stars: int) -> str:
@@ -1142,6 +1143,199 @@ class HltvClient:
 
     async def get_events(self) -> list[dict]:
         return await self._call("get_events", cache_key=EVENTS_KEY)
+
+    # ---------------------------------------------------------------- 年度 TOP20
+
+    def latest_top20_year(self) -> int:
+        return self._now_local().year - 1
+
+    @staticmethod
+    def _parse_top20_article_url(page: Any, year: int) -> str:
+        exact = re.compile(
+            rf"top-20-players-of-{year}-(?:final-list|final-ranking)",
+            re.IGNORECASE,
+        )
+        fallback = re.compile(
+            rf"top\s*20\s+players\s+of\s+{year}.*final\s+(?:list|ranking)",
+            re.IGNORECASE,
+        )
+        links = list(page.find_all("a", href=True))
+        for link in links:
+            href = str(link.get("href") or "").strip()
+            if exact.search(href):
+                url = urljoin("https://www.hltv.org/", href)
+                parsed = urlparse(url)
+                if parsed.scheme == "https" and parsed.hostname == "www.hltv.org":
+                    return url
+        for link in links:
+            href = str(link.get("href") or "").strip()
+            text = link.get_text(" ", strip=True)
+            if fallback.search(f"{text} {href.replace('-', ' ')}"):
+                url = urljoin("https://www.hltv.org/", href)
+                parsed = urlparse(url)
+                if parsed.scheme == "https" and parsed.hostname == "www.hltv.org":
+                    return url
+        return ""
+
+    @staticmethod
+    def _parse_top20_image_url(page: Any, year: int) -> str:
+        allowed_hosts = {"www.hltv.org", "img-cdn.hltv.org"}
+
+        def official_url(value: Any) -> str:
+            url = urljoin("https://www.hltv.org/", str(value or "").strip())
+            parsed = urlparse(url)
+            if parsed.scheme == "https" and parsed.hostname in allowed_hosts:
+                return url
+            return ""
+
+        candidates: list[tuple[int, int, str]] = []
+        for index, image in enumerate(page.find_all("img")):
+            source = (
+                image.get("src")
+                or image.get("data-src")
+                or image.get("data-original")
+            )
+            if not source and image.get("srcset"):
+                source = str(image.get("srcset")).split(",", 1)[0].strip().split(" ", 1)[0]
+            parent_link = image.find_parent("a", href=True)
+            if parent_link is not None:
+                linked_url = official_url(parent_link.get("href"))
+                if Path(urlparse(linked_url).path).suffix.lower() in {
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".webp",
+                    ".gif",
+                }:
+                    source = linked_url
+            url = official_url(source)
+            if not url:
+                continue
+            context = " ".join(
+                str(value or "")
+                for value in (
+                    url,
+                    image.get("alt"),
+                    image.get("title"),
+                    " ".join(image.get("class") or []),
+                )
+            ).lower()
+            score = 0
+            if str(year) in context:
+                score += 6
+            if any(
+                token in context
+                for token in ("top20", "top-20", "top_20", "top 20")
+            ):
+                score += 6
+            if any(token in context for token in ("final", "ranking", "players")):
+                score += 2
+            if image.find_parent("figure") is not None:
+                score += 4
+            elif image.find_parent("article") is not None or image.find_parent(
+                class_=re.compile(r"news", re.IGNORECASE)
+            ) is not None:
+                score += 2
+            if any(token in context for token in ("flag", "avatar", "logo", "advert")):
+                score -= 8
+            candidates.append((score, -index, url))
+
+        meta = page.find("meta", attrs={"property": "og:image"})
+        if meta is not None:
+            url = official_url(meta.get("content"))
+            if url:
+                context = url.lower()
+                score = 3
+                if str(year) in context:
+                    score += 6
+                if any(token in context for token in ("top20", "top-20", "top_20")):
+                    score += 6
+                candidates.append((score, 0, url))
+
+        best = max(candidates, default=(0, 0, ""))
+        return best[2] if best[0] > 0 else ""
+
+    async def _download_top20_image(
+        self, url: str, year: int, referer: str = "https://www.hltv.org/"
+    ) -> Path:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in {
+            "www.hltv.org",
+            "img-cdn.hltv.org",
+        }:
+            raise HltvError("HLTV TOP20 图片地址无效。")
+
+        cache_dir = Path.home() / ".astrbot_plugin_hltv" / "top20"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(url.encode()).hexdigest()[:16]
+        stem = f"top20_{year}_{digest}"
+        for suffix in (".png", ".jpg", ".webp", ".gif"):
+            cached = cache_dir / f"{stem}{suffix}"
+            if cached.is_file() and cached.stat().st_size > 0:
+                return cached
+
+        timeout = aiohttp.ClientTimeout(total=max(15, min(self._timeout, 30)))
+        proxy = self._proxy_list[0] if self._proxy_list else None
+        headers = {
+            **_BROWSER_HEADERS,
+            "referer": referer,
+            "accept": "image/webp,image/png,image/jpeg,image/*;q=0.8",
+        }
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(url, proxy=proxy) as response:
+                    if response.url.host not in {"www.hltv.org", "img-cdn.hltv.org"}:
+                        raise HltvError("HLTV TOP20 图片跳转到了非官方地址。")
+                    if response.status != 200:
+                        raise HltvError(
+                            f"HLTV TOP20 图片下载失败（HTTP {response.status}）。"
+                        )
+                    body = await response.content.read(12 * 1024 * 1024 + 1)
+        except HltvError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            raise HltvError("HLTV TOP20 图片下载失败，请稍后重试或配置代理。") from e
+
+        if body.startswith(b"\x89PNG"):
+            suffix = ".png"
+        elif body.startswith(b"\xff\xd8\xff"):
+            suffix = ".jpg"
+        elif body.startswith(b"RIFF") and body[8:12] == b"WEBP":
+            suffix = ".webp"
+        elif body.startswith((b"GIF87a", b"GIF89a")):
+            suffix = ".gif"
+        else:
+            raise HltvError("HLTV TOP20 返回的内容不是可识别的图片。")
+        if len(body) > 12 * 1024 * 1024:
+            raise HltvError("HLTV TOP20 图片超过 12MB，已停止下载。")
+
+        destination = cache_dir / f"{stem}{suffix}"
+        destination.write_bytes(body)
+        return destination
+
+    async def get_top20_image(self, year: int) -> Path:
+        async def fetch() -> Path:
+            archive = await self._fetch_raw(
+                f"https://www.hltv.org/news/archive/{year + 1}/january"
+            )
+            article_url = self._parse_top20_article_url(archive, year)
+            if not article_url:
+                archive = await self._fetch_raw(
+                    f"https://www.hltv.org/news/archive/{year}/december"
+                )
+                article_url = self._parse_top20_article_url(archive, year)
+            if not article_url:
+                raise HltvError(f"没有找到 HLTV {year} 年 TOP20 最终榜单。")
+
+            article = await self._fetch_raw(article_url)
+            image_url = self._parse_top20_image_url(article, year)
+            if not image_url:
+                raise HltvError(f"没有找到 HLTV {year} 年 TOP20 官方总图。")
+            return await self._download_top20_image(
+                image_url, year, referer=article_url
+            )
+
+        return await self._cached_locked(f"top20:{year}", fetch, ttl=86400)
 
     # ---------------------------------------------------------------- 新闻
 
