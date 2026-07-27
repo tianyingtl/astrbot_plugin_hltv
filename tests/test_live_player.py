@@ -44,6 +44,7 @@ from core.renderer import (
     render_results_card,
     render_team_card,
     render_top20_card,
+    render_top20_player_card,
 )
 from core.subscriptions import LiveSubscriptionStore, advance_subscription
 from core.translator import Translator
@@ -231,8 +232,10 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result["image_path"])
         self.assertEqual(len(result["players"]), 20)
-        self.assertEqual(result["players"][0], {"rank": 1, "name": "Player 1"})
-        self.assertEqual(result["players"][-1], {"rank": 20, "name": "Player 20"})
+        self.assertEqual(result["players"][0]["rank"], 1)
+        self.assertEqual(result["players"][0]["name"], "Player 1")
+        self.assertEqual(result["players"][-1]["rank"], 20)
+        self.assertEqual(result["players"][-1]["name"], "Player 20")
 
     async def test_top20_uses_archive_when_year_has_no_final_list_article(self):
         january = self._archive(2023, range(1, 16))
@@ -259,6 +262,88 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["image_path"])
         self.assertEqual(len(result["players"]), 20)
         client._download_top20_image.assert_not_awaited()
+
+    async def test_top20_player_returns_article_and_falls_back_when_image_is_forbidden(self):
+        january = BeautifulSoup(
+            """
+            <a href="/news/43505/top-20-players-of-2025-niko-18">
+              Top 20 players of 2025: NiKo (18) 2025-12-26 285 comments
+            </a>
+            """,
+            "lxml",
+        )
+        article = BeautifulSoup(
+            """
+            <meta property="og:description" content="NiKo sets a new Top 20 record.">
+            <meta property="og:image" content="https://img-cdn.hltv.org/gallerypicture/share.jpg">
+            <article class="newsitem standard-box">
+              <h1 class="headline">Top 20 players of 2025: NiKo (18)</h1>
+              <div class="newstext-con">
+                <div class="image-con"><img class="image"
+                  src="https://img-cdn.hltv.org/gallerypicture/niko-top18.png"></div>
+                <a class="news-read-more-1"><img class="news-read-more-image"
+                  src="https://img-cdn.hltv.org/gallerypicture/unrelated.jpg"></a>
+              </div>
+            </article>
+            """,
+            "lxml",
+        )
+        client = HltvClient(cache_ttl=300)
+        client._download_top20_image = AsyncMock(
+            side_effect=HltvError("HLTV TOP20 图片下载失败（HTTP 403）。")
+        )
+
+        class FakeHltv:
+            USE_PROXY = False
+            session = object()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def _fetch(self, url):
+                return article if "/news/43505/" in url else january
+
+        fake_hltv = FakeHltv()
+        with patch("core.client.Hltv", return_value=fake_hltv):
+            result = await client.get_top20_player(2025, 18)
+
+        self.assertEqual(result["name"], "NiKo")
+        self.assertEqual(result["rank"], 18)
+        self.assertEqual(result["title"], "Top 20 players of 2025: NiKo (18)")
+        self.assertEqual(result["description"], "NiKo sets a new Top 20 record.")
+        self.assertEqual(
+            result["url"],
+            "https://www.hltv.org/news/43505/top-20-players-of-2025-niko-18",
+        )
+        self.assertIsNone(result["image_path"])
+        client._download_top20_image.assert_awaited_once_with(
+            "https://img-cdn.hltv.org/gallerypicture/niko-top18.png",
+            2025,
+            referer=result["url"],
+            session=fake_hltv.session,
+            proxy=None,
+        )
+
+    def test_top20_player_fallback_card_renders(self):
+        item = {
+            "year": 2025,
+            "rank": 18,
+            "name": "NiKo",
+            "title": "Top 20 players of 2025: NiKo (18)",
+            "description": "A stable season with several deep tournament runs.",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = render_top20_player_card(
+                item,
+                background_path=CARD_BASE_BACKGROUND,
+                output_dir=Path(tmp),
+            )
+            with Image.open(output) as card:
+                self.assertEqual(card.size, CARD_SIZE)
+                self.assertIsNotNone(card.getbbox())
 
     def test_top20_fallback_card_renders_all_twenty_players(self):
         players = [

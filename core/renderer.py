@@ -735,6 +735,62 @@ def render_top20_card(
     return _save(canvas, output_dir, f"top20_{year}.png")
 
 
+def render_top20_player_card(
+    item: dict,
+    *,
+    background_path: Path | None = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    canvas, draw = _base_canvas(
+        _pick_background(background_path), centering=(0.5, 0.35)
+    )
+    year = int(item.get("year") or 0)
+    rank = int(item.get("rank") or 0)
+    name = str(item.get("name") or "?")
+    _section_header(draw, f"HLTV TOP 20 / {year}", "年度选手排名  ·  个人专题")
+
+    rank_text = f"#{rank:02d}"
+    rank_font = _fit_font(draw, rank_text, 190, 430, bold=True, minimum=120)
+    draw.text((72, 310), rank_text, font=rank_font, fill=ACCENT)
+    _label(draw, (82, 545), "ANNUAL RANKING")
+    draw.text((80, 586), str(year), font=_font(46, True), fill=INK)
+    draw.line((560, 310, 560, 900), fill=LINE, width=2)
+
+    name_font = _fit_font(draw, name, 92, 860, bold=True, minimum=52)
+    draw.text((630, 300), name, font=name_font, fill=INK)
+    _label(draw, (636, 430), "HLTV ARTICLE")
+
+    title = str(item.get("title") or "").strip()
+    title_font = _font(32, True)
+    for index, line in enumerate(_wrap_text(draw, title, title_font, 850, 2)):
+        draw.text((630, 470 + index * 44), line, font=title_font, fill=INK)
+
+    description = str(item.get("description") or "").strip()
+    if description:
+        _label(draw, (636, 590), "SUMMARY")
+        summary_font = _font(27)
+        summary = (
+            re.sub(r"\s+", "", description)
+            if re.search(r"[\u3400-\u9fff]", description)
+            else description
+        )
+        for index, line in enumerate(
+            _wrap_text(draw, summary, summary_font, 850, 5)
+        ):
+            draw.text(
+                (630, 632 + index * 42),
+                line,
+                font=summary_font,
+                fill=MUTED,
+            )
+    draw.text((630, 890), "HLTV.ORG", font=_font(22, True), fill=ACCENT)
+    return _save(
+        canvas,
+        output_dir,
+        f"top20_{year}_{rank}_{_safe_name(name)}.png",
+    )
+
+
 def render_events_card(
     events: list[dict],
     *,

@@ -57,6 +57,7 @@ pip install -r requirements.txt
 | `/hltv ranking asia\|europe\|americas` | 查看指定地区的 Valve VRS 排名 |
 | `/hltv ranking hltv` | 查看 HLTV 世界排名 |
 | `/hltv top20 [年份]` | 查看年度 TOP20；不填年份时查询上一年 |
+| `/hltv top20 <年份> <名次>` | 查看指定名次的 HLTV 新闻和个人 TOP 图片 |
 | `/hltv events` | 查看近期赛事 |
 | `/hltv team <名称>` | 查看战队资料、阵容和近期战绩 |
 | `/hltv player <昵称>` | 查看选手资料、排名与荣誉 |

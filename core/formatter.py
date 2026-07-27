@@ -453,7 +453,7 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名
 /hltv ranking hltv — HLTV 自家排名
-/hltv top20 [年份] — HLTV 年度 TOP20 榜单（默认上一年）
+/hltv top20 [年份] [名次] — 年度榜单或指定名次新闻（默认上一年）
 /hltv events — 近期赛事
 /hltv team <名称> — 战队详情图片卡（任意战队，支持空格）
 /hltv player <昵称> — 选手生涯荣誉图片卡

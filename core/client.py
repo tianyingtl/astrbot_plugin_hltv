@@ -1289,8 +1289,30 @@ class HltvClient:
                 )
                 if name:
                     if title_match or rank not in players:
-                        players[rank] = {"rank": rank, "name": name}
+                        players[rank] = {
+                            "rank": rank,
+                            "name": name,
+                            "url": f"https://www.hltv.org{path}",
+                        }
         return [players[rank] for rank in sorted(players)]
+
+    @staticmethod
+    def _parse_top20_player_image_url(page: Any) -> str:
+        allowed_hosts = {"www.hltv.org", "img-cdn.hltv.org"}
+        for image in page.select(
+            "article.newsitem .newstext-con .image-con img.image"
+        ):
+            source = image.get("src") or image.get("data-src")
+            url = urljoin("https://www.hltv.org/", str(source or "").strip())
+            parsed = urlparse(url)
+            if (
+                parsed.scheme == "https"
+                and parsed.hostname in allowed_hosts
+                and Path(parsed.path).suffix.lower()
+                in {".png", ".jpg", ".jpeg", ".webp"}
+            ):
+                return url
+        return ""
 
     async def _download_top20_image(
         self,
@@ -1478,6 +1500,115 @@ class HltvClient:
         if image_path:
             return Path(image_path)
         raise HltvError(f"HLTV {year} 年 TOP20 官方总图当前不可用。")
+
+    async def get_top20_player(self, year: int, rank: int) -> dict:
+        if not 1 <= rank <= 20:
+            raise HltvError("TOP20 名次范围为 1-20。")
+
+        async def fetch() -> dict:
+            if Hltv is None:
+                raise HltvError(
+                    "依赖 hltv-async-api 未安装。请在 WebUI 插件管理中安装依赖后重载插件。"
+                )
+
+            async def fetch_page(hltv: Any, url: str) -> Any:
+                fetcher = getattr(hltv, "_fetch", None)
+                if fetcher is None:
+                    raise HltvError(
+                        "hltv-async-api 版本不兼容（缺少 _fetch），请安装 0.8.x 版本。"
+                    )
+                page = await fetcher(url)
+                if page is None:
+                    raise HltvError("HLTV 未返回数据（可能被风控拦截）。")
+                return page
+
+            try:
+                async with Hltv(**self._hltv_opts) as hltv:
+                    january = await fetch_page(
+                        hltv,
+                        f"https://www.hltv.org/news/archive/{year + 1}/january",
+                    )
+                    players = self._parse_top20_players([january], year)
+                    target = next(
+                        (player for player in players if player["rank"] == rank),
+                        None,
+                    )
+                    if target is None:
+                        december = await fetch_page(
+                            hltv,
+                            f"https://www.hltv.org/news/archive/{year}/december",
+                        )
+                        players = self._parse_top20_players(
+                            [january, december], year
+                        )
+                        target = next(
+                            (player for player in players if player["rank"] == rank),
+                            None,
+                        )
+                    if target is None:
+                        raise HltvError(
+                            f"没有找到 HLTV {year} 年 TOP20 第 {rank} 名的新闻。"
+                        )
+
+                    article_url = str(target["url"])
+                    article = await fetch_page(hltv, article_url)
+                    headline = article.select_one("h1.headline") or article.find("h1")
+                    title = (
+                        headline.get_text(" ", strip=True)
+                        if headline is not None
+                        else f"Top 20 players of {year}: {target['name']} ({rank})"
+                    )
+                    description_meta = article.find(
+                        "meta", attrs={"property": "og:description"}
+                    )
+                    description = (
+                        str(description_meta.get("content") or "").strip()
+                        if description_meta is not None
+                        else ""
+                    )
+                    image_path = None
+                    image_url = self._parse_top20_player_image_url(article)
+                    if image_url:
+                        active_proxy = None
+                        if getattr(hltv, "USE_PROXY", False):
+                            get_proxy = getattr(hltv, "_get_proxy", None)
+                            active_proxy = get_proxy() if callable(get_proxy) else None
+                        try:
+                            image_path = await self._download_top20_image(
+                                image_url,
+                                year,
+                                referer=article_url,
+                                session=getattr(hltv, "session", None),
+                                proxy=active_proxy,
+                            )
+                        except HltvError as e:
+                            logger.warning(
+                                f"[hltv] {year} 年 TOP20 第 {rank} 名官方图不可用，"
+                                f"改用本地渲染: {e}"
+                            )
+                    return {
+                        "year": year,
+                        "rank": rank,
+                        "name": target["name"],
+                        "title": title,
+                        "description": description,
+                        "url": article_url,
+                        "image_path": image_path,
+                    }
+            except HltvError:
+                raise
+            except Exception as e:
+                logger.error(
+                    f"[hltv] 获取 {year} 年 TOP20 第 {rank} 名失败: {e!r}"
+                )
+                raise HltvError(
+                    "请求 HLTV 失败，可能是网络问题或触发了 Cloudflare 风控，"
+                    "可稍后重试或在插件配置中设置代理。"
+                ) from e
+
+        return await self._cached_locked(
+            f"top20:player:{year}:{rank}", fetch, ttl=86400
+        )
 
     # ---------------------------------------------------------------- 新闻
 

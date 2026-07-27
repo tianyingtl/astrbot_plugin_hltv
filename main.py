@@ -42,6 +42,7 @@ from .core.renderer import (
     render_results_card,
     render_team_card,
     render_top20_card,
+    render_top20_player_card,
 )
 from .core.subscriptions import (
     LiveSubscriptionStore,
@@ -553,8 +554,10 @@ class HltvPlugin(Star):
         )
 
     @hltv.command("top20", alias={"年度榜单"})
-    async def top20(self, event: AstrMessageEvent, year: str = ""):
-        """HLTV 年度 TOP20 榜单；默认上一年。"""
+    async def top20(
+        self, event: AstrMessageEvent, year: str = "", rank: str = ""
+    ):
+        """HLTV 年度 TOP20 榜单或指定名次新闻；默认上一年。"""
         latest = self.client.latest_top20_year()
         raw_year = str(year or "").strip()
         if raw_year:
@@ -562,7 +565,7 @@ class HltvPlugin(Star):
                 selected = int(raw_year)
             except ValueError:
                 yield event.plain_result(
-                    "用法：/hltv top20 [年份]，例如 /hltv top20 2023"
+                    "用法：/hltv top20 [年份] [名次]，例如 /hltv top20 2025 18"
                 )
                 return
         else:
@@ -572,8 +575,69 @@ class HltvPlugin(Star):
                 f"TOP20 年份范围为 {TOP20_MIN_YEAR}-{latest}；不填年份默认查询 {latest}。"
             )
             return
-        if tip := self._waiting_tip(event, f"top20:{selected}"):
+        raw_rank = str(rank or "").strip()
+        selected_rank = 0
+        if raw_rank:
+            try:
+                selected_rank = int(raw_rank)
+            except ValueError:
+                yield event.plain_result("TOP20 名次必须是 1-20 的整数。")
+                return
+            if not 1 <= selected_rank <= 20:
+                yield event.plain_result("TOP20 名次范围为 1-20。")
+                return
+
+        cache_key = (
+            f"top20:player:{selected}:{selected_rank}"
+            if selected_rank
+            else f"top20:{selected}"
+        )
+        if tip := self._waiting_tip(event, cache_key):
             yield tip
+        if selected_rank:
+            try:
+                result = await self.client.get_top20_player(
+                    selected, selected_rank
+                )
+            except HltvError as e:
+                yield event.plain_result(str(e))
+                return
+
+            original_title = str(result.get("title") or "")
+            title = original_title
+            description = str(result.get("description") or "")
+            if self.translate_news:
+                translated = await self._translate_to_chinese(
+                    [title, description]
+                )
+                title, description = translated
+            card_data = {
+                **result,
+                "title": title,
+                "description": description,
+            }
+            image = result.get("image_path")
+            if image:
+                image_message = event.image_result(str(image))
+            else:
+                image_message = await self._image_or_text(
+                    event,
+                    render_top20_player_card,
+                    "TOP20 个人图片生成失败，请通过新闻原文查看。",
+                    card_data,
+                    log_name="TOP20 个人卡片",
+                )
+            yield event.plain_result(
+                formatter.format_news_detail(
+                    title,
+                    [description] if description else [],
+                    str(result.get("url") or ""),
+                    original_title=original_title,
+                )
+            )
+            yield image_message
+            return
+
         try:
             result = await self.client.get_top20(selected)
         except HltvError as e:
@@ -742,7 +806,11 @@ class HltvPlugin(Star):
         elif sub in ("ranking", "排名", "排行"):
             handler = self.ranking(event, kind=args[0] if args else "")
         elif sub in ("top20", "年度榜单"):
-            handler = self.top20(event, year=args[0] if args else "")
+            handler = self.top20(
+                event,
+                year=args[0] if args else "",
+                rank=args[1] if len(args) > 1 else "",
+            )
         elif sub in ("events", "赛事"):
             handler = self.events(event)
         elif sub in ("team", "战队"):
