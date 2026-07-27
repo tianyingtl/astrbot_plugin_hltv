@@ -1,129 +1,103 @@
 # astrbot_plugin_hltv
 
-AstrBot 插件：在聊天里查询 [HLTV](https://www.hltv.org/)（CS2 赛事数据）。
+用于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的 HLTV 数据查询插件，支持
+CS2 赛程、实时比分、赛果、排名、战队、选手、新闻及比赛提醒。
+
+## 功能
+
+- 查询今日赛程、近期比赛、实时比分和历史赛果
+- 查询 Valve VRS、HLTV 世界排名和年度 TOP20
+- 查看战队阵容、排名、奖杯、近期战绩及选手荣誉
+- 订阅直播比赛，在新地图开始和比赛结束时接收提醒
+- 比赛结束后展示双方选手 Rating
+- 新闻标题中英双语显示，并提供中文摘要
+- 查询结果优先使用图片卡片，渲染失败时自动返回文字
+- 支持每日赛程定时推送和群聊免 @ 调用
 
 ## 效果预览
 
-图片均由插件当前渲染器生成。赛事与比分使用 `2026-07-27` 查询快照和功能示例，
-实际内容会随 HLTV 数据实时更新。
+### 选手详情
 
-### NiKo 选手详情
-
-使用 `/hltv player NiKo` 查询选手资料、Rating、TOP 20、赛事冠军和 MVP 荣誉。
-
-![NiKo 选手详情卡](docs/images/player-niko.webp)
+![选手详情卡](docs/images/player-niko.webp)
 
 ### 近期赛事
 
-使用 `/hltv matches` 查看近期赛程，直播中的比赛会优先显示。
-
-![HLTV 近期赛事卡](docs/images/recent-matches.webp)
+![近期赛事卡](docs/images/recent-matches.webp)
 
 ### 实时比分
 
-使用 `/hltv live` 查看直播比赛；每场比赛的小局比分在上，大局比分在下。
+![实时比分卡](docs/images/live-score.webp)
 
-![HLTV 实时比分卡](docs/images/live-score.webp)
+## 安装
+
+可在 AstrBot WebUI 的插件市场中安装，也可以下载 Release 压缩包后在插件管理页上传。
+
+手动安装：
+
+```bash
+cd data/plugins
+git clone https://github.com/tianyingtl/astrbot_plugin_hltv.git
+cd astrbot_plugin_hltv
+pip install -r requirements.txt
+```
+
+安装完成后，在 AstrBot WebUI 中重载插件。
 
 ## 指令
 
 | 指令 | 说明 |
 | --- | --- |
-| `/hltv today` | 今日赛程图片卡（直播中优先；过滤后为空时自动回退显示全部） |
-| `/hltv matches [天数]` | 近期大赛图片卡（默认 1 天，上限 7 天；星级门槛见配置） |
-| `/hltv live` | 直播图片卡；每场独立分区，小局比分在上、大局比分在下 |
-| `/hltv live <队名>` | 只看该队并自动订阅（如 `100t`）；新地图/完赛时自动 @，完赛附 Rating |
-| `/hltv live 取消` | 取消当前账号在本会话的全部直播提醒 |
-| `/hltv results [天数]` | 近期赛果图片卡（不做星级过滤） |
-| `/hltv ranking` | **Valve VRS 排名图片卡**（默认全球，V社积分） |
-| `/hltv ranking asia\|europe\|americas` | 地区 VRS 排名（可用中文：亚洲/欧洲/美洲） |
-| `/hltv ranking hltv` | HLTV 自家世界排名 |
-| `/hltv top20 [年份]` | HLTV 年度 TOP20 官方总图；不填年份默认上一年（如 `top20 2023`） |
-| `/hltv events` | 近期赛事图片卡 |
-| `/hltv team <名称>` | 战队图片卡：VRS/HLTV 双排名、阵容、教练、年龄、奖杯、近期战绩 |
-| `/hltv player <昵称>` | 选手图片卡：Rating、官方 TOP 奖杯、Major、赛事冠军与 MVP 赛事 |
-| `/hltv news` | 今日新闻图片卡（编号列表，中英双语标题） |
-| `/hltv news <序号>` | 新闻详情（正文摘要+翻译+原文链接） |
-| `/hltv sub` / `unsub` | 在本会话订阅/退订每日赛程推送 |
-| `/hltv help` | 帮助 |
+| `/hltv today` | 查看今日赛程 |
+| `/hltv matches [天数]` | 查看近期比赛，默认 1 天，最多 7 天 |
+| `/hltv live` | 查看正在进行的比赛和比分 |
+| `/hltv live <队名>` | 查看指定战队，并订阅该场比赛 |
+| `/hltv live 取消` | 取消当前账号在本会话中的直播订阅 |
+| `/hltv results [天数]` | 查看近期赛果 |
+| `/hltv ranking` | 查看全球 Valve VRS 排名 |
+| `/hltv ranking asia\|europe\|americas` | 查看指定地区的 Valve VRS 排名 |
+| `/hltv ranking hltv` | 查看 HLTV 世界排名 |
+| `/hltv top20 [年份]` | 查看年度 TOP20；不填年份时查询上一年 |
+| `/hltv events` | 查看近期赛事 |
+| `/hltv team <名称>` | 查看战队资料、阵容和近期战绩 |
+| `/hltv player <昵称>` | 查看选手资料、排名与荣誉 |
+| `/hltv news` | 查看今日新闻列表 |
+| `/hltv news <序号>` | 查看新闻摘要、翻译和原文链接 |
+| `/hltv sub` | 订阅当前会话的每日赛程推送 |
+| `/hltv unsub` | 取消当前会话的每日赛程推送 |
+| `/hltv help` | 查看指令帮助 |
 
-所有子指令支持中文别名：`今日`、`比赛`、`直播`、`赛果`、`排名`、`年度榜单`、
-`赛事`、`战队`、`选手`、`新闻`、`订阅`、`退订`、`帮助`。直接发 `/hltv`
-会显示指令菜单。
-
-**免 @ 响应**：群里直接发 `/hltv ...` 即可触发，无需 @ 机器人、无需开启
-AstrBot 全局 `/` 唤醒前缀（配置 `free_wake` 可关闭）。拼错子指令会得到纠错提示。
+子指令同时支持中文别名。默认可直接发送 `/hltv ...`，无需 @ 机器人；该行为可通过
+`free_wake` 配置关闭。
 
 ## 配置
 
-在 AstrBot WebUI 的插件管理页配置（对应 `_conf_schema.json`）：
+在 AstrBot WebUI 的插件配置页中修改：
 
-| 配置项 | 默认 | 说明 |
+| 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `min_stars` | 1 | 比赛星级门槛（0-5）。过滤后为空会自动回退显示全部场次 |
-| `event_keywords` | 空 | 大赛关键词白名单（如 Major、IEM、BLAST），留空不启用 |
-| `translate_news` | 开 | 新闻标题/详情翻译成中文，标题同时保留英文原题（失败自动回退原文） |
-| `live_poll_interval` | 45 | 直播订阅轮询秒数（实际限制 20-300 秒） |
-| `enable_push` | 关 | 每日定时推送总开关（修改后需重载插件） |
-| `push_time` | 09:00 | 每日推送时间（HH:MM，按 timezone 时区） |
-| `push_sessions` | 空 | 订阅会话列表（用 `/hltv sub` 自动登记） |
-| `default_days` | 1 | `matches` / `results` 缺省天数 |
-| `max_items` | 10 | 列表类结果最多显示条数 |
-| `send_waiting_tip` | 关 | 查询前发"正在查询"提示（缓存命中时不发） |
-| `timezone` | Asia/Shanghai | 时间显示/今天判定/推送时间的时区 |
-| `proxy_list` | 空 | 代理列表，如 `http://127.0.0.1:7890` |
-| `timeout` | 15 | 单次请求超时（秒） |
-| `max_retries` | 3 | 失败重试次数 |
-| `cache_ttl` | 300 | 结果缓存秒数（比赛列表单独 ≤60 秒保证直播时效）；0 关闭 |
+| `min_stars` | `1` | 赛程最低星级，范围 0-5 |
+| `event_keywords` | 空 | 赛事名称关键词白名单，留空表示不启用 |
+| `translate_news` | 开启 | 翻译新闻标题和详情，并保留英文原标题 |
+| `live_poll_interval` | `45` | 直播订阅检查间隔，范围 20-300 秒 |
+| `enable_push` | 关闭 | 开启每日赛程推送，修改后需重载插件 |
+| `push_time` | `09:00` | 每日推送时间 |
+| `push_sessions` | 空 | 推送目标会话，通常由订阅指令自动维护 |
+| `default_days` | `1` | 赛程和赛果的默认查询天数 |
+| `max_items` | `10` | 列表类结果的最大显示数量 |
+| `free_wake` | 开启 | 允许无需 @ 直接调用 `/hltv` |
+| `send_waiting_tip` | 关闭 | 查询前发送等待提示 |
+| `timezone` | `Asia/Shanghai` | 比赛时间、日期和定时推送所用时区 |
+| `proxy_list` | 空 | 请求代理列表 |
+| `timeout` | `15` | 单次请求超时时间，单位为秒 |
+| `max_retries` | `3` | 请求失败后的最大重试次数 |
+| `cache_ttl` | `300` | 查询缓存时间，设为 0 可关闭缓存 |
 
-## 架构
+## 使用说明
 
-```
-main.py             指令层：/hltv 指令组、参数解析、翻译/推送编排
-core/client.py      数据层：自建解析器 + hltv-async-api 混合；
-                    TTL 缓存 + 全局锁串行化（30s 排队超时快速失败）
-core/formatter.py   展示层：数据 → 文本；防御式取值 + 哨兵值归一化
-core/renderer.py    图片层：Pillow 渲染 1600px 全幅半透明查询卡片
-core/subscriptions.py 状态层：直播提醒 JSON 持久化、地图/完赛状态流转
-core/translator.py  微软翻译（免费 Edge 通道，失败回退原文）
-```
+- 数据来自 HLTV 网站，页面结构调整或访问限制可能影响查询结果。
+- HLTV 对请求频率有限制；连接不稳定时可配置代理，并适当延长缓存时间。
+- 新闻翻译依赖第三方翻译服务，服务不可用时会显示英文原文。
+- 直播状态和赛后 Rating 以 HLTV 实际更新时间为准。
+- 图片卡片会从插件内置背景中随机选取，渲染失败时自动回退为文字消息。
 
-### 数据源分工（2026-07 实测各页面后确定）
-
-| 页面 | 方式 | 原因 |
-| --- | --- | --- |
-| matches | **自建解析** | HLTV 已改版，库 0.8.3 选择器全部失效；新版 data-* 属性（match-id/stars/live/unix 时间戳）更稳 |
-| team | **自建解析** | HLTV 新增 "Valve ranking" 行，库按位置取值整体错位（年龄显示成 Top30 周数） |
-| VRS 排名 | **自建解析** | 新功能，HLTV 站内 `/valve-ranking/` 页面 |
-| HLTV 排名 | **自建解析** | 与 VRS 共用 `.ranked-team` 结构 |
-| 年度 TOP20 | **自建解析** | 从次年一月/当年十二月新闻归档定位 final-list 文章，下载并缓存官方总图 |
-| 新闻 | **自建解析** | 保留完整文章链接供详情查看、不丢头条；Edge 认证后批量翻译中文 |
-| 单场比赛 | **自建解析** | 读取当前地图、系列赛比分与完赛 Rating 3.0，供直播提醒复用 |
-| results / events | 库 | 实测选择器健在 |
-| player | **自建解析** | 按 trophyHolder 拆分 TOP20、Major、赛事冠军、年度奖项与 MVP；库的旧统计选择器已失效 |
-| 传输层 | 库 `_fetch` | 统一复用其重试/代理轮换/Cloudflare 检测 |
-
-## 已知限制
-
-1. **数据来源是网页解析**，HLTV 改版可能导致失效；自建解析器优先用 data-*
-   属性，比 class 选择器更耐改版。请求已做缓存 + 串行化 + 排队超时，
-   仍建议配代理、避免高频调用。
-2. **搜索接口风控较严**：任意战队/选手查询走 `/search?term=` JSON 接口，
-   已做多次重试 + 代理轮换 + 库传输层兜底，选手查询另有选手榜回退。
-3. 依赖 `hltv-async-api~=0.8.3` 的**私有方法 `_fetch`** 作传输层；
-   该库 README 与源码严重不符（方法名/字段名/默认值），升级前必须核对源码。
-4. 翻译走微软 Edge 免费通道，无需配 key；接口失效时自动显示英文原文。
-5. 直播提醒保存在 `~/.astrbot_plugin_hltv/live_subscriptions.json`，插件重载后继续；
-   每条提醒最长保留 12 小时，完赛后自动移除。
-6. 图片卡内置 OFL 常用中文与多语种字体子集，不依赖 AstrBot 服务器安装系统中文字库；
-   字体许可见 `assets/fonts/OFL.txt`。官方 TOP/MVP 图片下载失败时会使用内置徽章。
-
-## 开发
-
-```bash
-# 放到 AstrBot 的插件目录下
-data/plugins/astrbot_plugin_hltv/
-pip install -r requirements.txt
-```
-
-解析器离线测试样本与脚本见仓库外的开发环境（真实 DOM 片段验证）。
+本项目与 HLTV 无官方关联，赛事数据及相关素材版权归其原权利人所有。
