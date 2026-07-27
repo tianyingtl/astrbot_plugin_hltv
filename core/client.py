@@ -70,30 +70,55 @@ _FIVEE_ARTICLE_HOSTS = {"csgo.5eplay.com", "www.5eplay.com"}
 _FIVEE_IMAGE_HOSTS = {"oss.5eplay.com", "static.5eplay.com"}
 _TOP20_IMAGE_HOSTS = _HLTV_TOP20_IMAGE_HOSTS | _FIVEE_IMAGE_HOSTS
 
-# 5E 没有可检索的 2014 年总览页，保留已验证的历史新闻图片地址。
-_FIVEE_TOP20_IMAGE_URLS = {
-    2014: {
-        1: "https://oss.5eplay.com/img/20160111/14524935863636.jpeg",
-        2: "https://oss.5eplay.com/img/20160119/14531660389536.png",
-        3: "https://oss.5eplay.com/editor/20250411/322a39d74f70d30bff0a5619d1a5bf34.png",
-        4: "https://oss.5eplay.com/img/20160120/14532540591044.png",
-        5: "https://oss.5eplay.com/img/20160112/14525802931344.png",
-        6: "https://oss.5eplay.com/img/20160116/14529280792241.png",
-        7: "https://oss.5eplay.com/img/20160106/14520735858443.png",
-        8: "https://oss.5eplay.com/img/20150114/14212424364402.jpeg",
-        9: "https://oss.5eplay.com/img/20160116/14529270995537.png",
-        10: "https://oss.5eplay.com/img/20160115/14528296718145.png",
-        11: "https://oss.5eplay.com/img/20160120/1453282155112.png",
-        12: "https://oss.5eplay.com/img/20160122/14534490517681.png",
-        13: "https://oss.5eplay.com/img/20150113/14211514087171.jpg",
-        14: "https://oss.5eplay.com/img/20150112/14210694405477.png",
-        15: "https://oss.5eplay.com/img/20160104/14518924594400.jpeg",
-        16: "https://oss.5eplay.com/img/20150106/1420547410747.jpg",
-        17: "https://oss.5eplay.com/img/20150105/1420463112857.jpeg",
-        18: "https://oss.5eplay.com/img/20150104/14203761437431.jpeg",
-        19: "https://oss.5eplay.com/editor/20200417/531601f1f428e7dc6e56948bc966863c.jpeg",
-        20: "https://oss.5eplay.com/img/20150102/14202047791846.png",
-    }
+_FIVEE_TOP20_POSTERS = {
+    2013: (
+        "https://csgo.5eplay.com/article/241203sredm0",
+        "https://oss.5eplay.com/editor/20241203/cefd72f358ccaf2e07fb17df5f7a01e4.png",
+    ),
+    2014: (
+        "https://csgo.5eplay.com/article/241203lys127",
+        "https://oss.5eplay.com/editor/20241204/fb37ad1a8245978a3ce7171f0f7cfdf3.png",
+    ),
+    2015: (
+        "https://csgo.5eplay.com/article/241203epzqv5",
+        "https://oss.5eplay.com/editor/20241208/c79e22058dd2bbe7ffb88482db054a44.png",
+    ),
+    2016: (
+        "https://csgo.5eplay.com/article/241207v670bc",
+        "https://oss.5eplay.com/editor/20241208/4b93e3ff0eeb95db549b3a89c4bc5476.png",
+    ),
+    2017: (
+        "https://csgo.5eplay.com/article/2412118yczqm",
+        "https://oss.5eplay.com/editor/20241215/d1392c41dafc5194b0b7afbc0412f21f.png",
+    ),
+    2018: (
+        "https://csgo.5eplay.com/article/24121604ul8k",
+        "https://oss.5eplay.com/editor/20241217/ec2537a0c410cc792ae5f0d9fc800c21.png",
+    ),
+    2019: (
+        "https://csgo.5eplay.com/article/241219aqh78b",
+        "https://oss.5eplay.com/editor/20241219/b05ea4fe369317d6704c384ed6e39d79.png",
+    ),
+    2020: (
+        "https://csgo.5eplay.com/article/241222w18iln",
+        "https://oss.5eplay.com/editor/20241222/deaed6e750b2bb141eff021cd18c56b4.png",
+    ),
+    2021: (
+        "https://csgo.5eplay.com/article/241223kg2h87",
+        "https://oss.5eplay.com/editor/20241223/562dfb9c39ad974bc39109d7e47b43f9.png",
+    ),
+    2022: (
+        "https://csgo.5eplay.com/article/241223rlpeb9",
+        "https://oss.5eplay.com/editor/20241224/148e904ccbdcf7799d77a69f25a732b5.jpg",
+    ),
+    2023: (
+        "https://csgo.5eplay.com/article/241225dr0172",
+        "https://oss.5eplay.com/editor/20241225/3c187f9d1fb3d64caa1ae4b6b2ae31df.png",
+    ),
+    2024: (
+        "https://csgo.5eplay.com/article/251223wl4s8c",
+        "https://oss.5eplay.com/editor/20251223/59625684505e256e89998280366ab1e2.png",
+    ),
 }
 
 _BROWSER_HEADERS = {
@@ -1360,40 +1385,6 @@ class HltvClient:
                         }
         return [players[rank] for rank in sorted(players)]
 
-    async def _prepare_fivee_top20_images(
-        self, players: list[dict], year: int
-    ) -> list[dict]:
-        prepared = [dict(player) for player in players]
-        image_urls = _FIVEE_TOP20_IMAGE_URLS.get(year, {})
-        if not image_urls:
-            return prepared
-
-        proxy = self._proxy_list[0] if self._proxy_list else None
-        async with aiohttp.ClientSession() as session:
-            semaphore = asyncio.Semaphore(4)
-
-            async def prepare(player: dict) -> None:
-                rank = int(player.get("rank") or 0)
-                image_url = image_urls.get(rank)
-                if not image_url or player.get("image_path"):
-                    return
-                async with semaphore:
-                    try:
-                        player["image_path"] = await self._download_top20_image(
-                            image_url,
-                            year,
-                            referer="https://csgo.5eplay.com/",
-                            session=session,
-                            proxy=proxy,
-                        )
-                    except HltvError as e:
-                        logger.warning(
-                            f"[hltv] 5E {year} 年 TOP20 第 {rank} 名图片不可用: {e}"
-                        )
-
-            await asyncio.gather(*(prepare(player) for player in prepared))
-        return prepared
-
     @staticmethod
     def _parse_top20_player_image_url(page: Any) -> str:
         allowed_hosts = {"www.hltv.org", "img-cdn.hltv.org"}
@@ -1584,6 +1575,25 @@ class HltvClient:
 
     async def get_top20(self, year: int) -> dict:
         async def fetch() -> dict:
+            fivee_poster = _FIVEE_TOP20_POSTERS.get(year)
+            if fivee_poster:
+                article_url, image_url = fivee_poster
+                try:
+                    image_path = await self._download_top20_image(
+                        image_url,
+                        year,
+                        referer=article_url,
+                    )
+                    return {
+                        "year": year,
+                        "image_path": image_path,
+                        "players": [],
+                    }
+                except HltvError as e:
+                    logger.warning(
+                        f"[hltv] 5E {year} 年 TOP20 总榜不可用，改用 HLTV: {e}"
+                    )
+
             if Hltv is None:
                 raise HltvError(
                     "依赖 hltv-async-api 未安装。请在 WebUI 插件管理中安装依赖后重载插件。"
@@ -1619,9 +1629,6 @@ class HltvClient:
                             [january, december], year
                         )
                         if len(players) == 20:
-                            players = await self._prepare_fivee_top20_images(
-                                players, year
-                            )
                             return {
                                 "year": year,
                                 "image_path": None,
@@ -1630,29 +1637,6 @@ class HltvClient:
                         raise HltvError(f"没有找到完整的 HLTV {year} 年 TOP20 榜单。")
 
                     article = await fetch_page(hltv, article_url)
-                    prepared_players = None
-                    if year in _FIVEE_TOP20_IMAGE_URLS:
-                        if december is None:
-                            december = await fetch_page(
-                                hltv,
-                                f"https://www.hltv.org/news/archive/{year}/december",
-                            )
-                        players = self._parse_top20_players(
-                            [january, december, article], year
-                        )
-                        if len(players) == 20:
-                            prepared_players = await self._prepare_fivee_top20_images(
-                                players, year
-                            )
-                            if any(
-                                player.get("image_path")
-                                for player in prepared_players
-                            ):
-                                return {
-                                    "year": year,
-                                    "image_path": None,
-                                    "players": prepared_players,
-                                }
                     image_url = self._parse_top20_image_url(article, year)
                     download_error = None
                     if image_url:
@@ -1691,9 +1675,6 @@ class HltvClient:
                         [january, december, article], year
                     )
                     if len(players) == 20:
-                        players = prepared_players or (
-                            await self._prepare_fivee_top20_images(players, year)
-                        )
                         return {"year": year, "image_path": None, "players": players}
                     if players:
                         logger.warning(
