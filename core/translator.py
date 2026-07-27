@@ -20,7 +20,7 @@ _TOKEN_TTL = 8 * 60
 
 
 class Translator:
-    def __init__(self, timeout: int = 10):
+    def __init__(self, timeout: int = 30):
         self._timeout = timeout
         self._token: str | None = None
         self._token_ts = 0.0

@@ -452,65 +452,157 @@ class HltvClient:
     @staticmethod
     def _parse_match_maps(page: Any) -> list[dict]:
         """单场详情页的地图比分（服务器渲染，列表页拿不到）。
-        每项 {'map','s1','s2'}，未开地图的比分是 '-'。"""
+        played 标识已经进入的地图，finished / winner 来自结果区的 won/lost 类。"""
         maps = []
         for holder in page.find_all("div", class_="mapholder"):
             name_el = holder.find(class_="mapname")
+            result = holder.find("div", class_="results")
+            result_classes = result.get("class") or [] if result is not None else []
+            left = holder.find(class_="results-left")
+            right = holder.find(class_="results-right")
+            left_classes = left.get("class") or [] if left is not None else []
+            right_classes = right.get("class") or [] if right is not None else []
             scores = [
                 e.get_text(strip=True)
                 for e in holder.find_all(class_="results-team-score")
             ]
             if len(scores) >= 2:
+                winner = 1 if "won" in left_classes else (2 if "won" in right_classes else 0)
                 maps.append(
                     {
                         "map": name_el.get_text(strip=True) if name_el else "?",
                         "s1": scores[0],
                         "s2": scores[1],
+                        "played": "played" in result_classes,
+                        "finished": winner > 0,
+                        "winner": winner,
                     }
                 )
         return maps
 
     @staticmethod
     def summarize_map_scores(maps: list[dict]) -> dict:
-        """地图比分 → {'maps_score': '1:0', 'current_map': '当前 Ancient 4:8'}。
-        完赛判定：一方 ≥13 分且分差非零（含加时近似）。
-
-        对局初期详情页比分全是 '-'（服务器尚未同步），此时给出明确提示，
-        避免用户以为比分功能坏了。"""
+        """地图列表 → 大局比分、当前地图与当前小局比分。"""
         won1 = won2 = 0
-        current = ""
-        has_digit = False
-        for m in maps:
+        active = None
+        active_index = 0
+        for index, m in enumerate(maps, start=1):
             s1, s2 = str(m.get("s1", "")), str(m.get("s2", ""))
-            if not s1.isdigit() or not s2.isdigit():
-                continue
-            has_digit = True
-            a, b = int(s1), int(s2)
-            if max(a, b) >= 13 and a != b:
-                won1 += a > b
-                won2 += b > a
-            else:
-                current = f"当前 {m.get('map', '?')} {a}:{b}"
-        out: dict[str, Any] = {}
-        if has_digit:
-            out["maps_score"] = f"{won1}:{won2}"
-            if current:
-                out["current_map"] = current
-        elif maps:
-            out["current_map"] = "比分暂未同步"
-        return out
+            finished = m.get("finished")
+            if finished is None:
+                finished = s1.isdigit() and s2.isdigit() and max(int(s1), int(s2)) >= 13
+            if finished:
+                winner = int(m.get("winner") or 0)
+                if not winner and s1.isdigit() and s2.isdigit() and s1 != s2:
+                    winner = 1 if int(s1) > int(s2) else 2
+                won1 += winner == 1
+                won2 += winner == 2
 
-    async def get_live_score(self, match_id: Any, url: str) -> list[dict]:
-        """抓单场详情页取地图比分。走缓存（≤_LIVE_TTL）避免刷屏打详情页。"""
+            played = m.get("played")
+            if played is None:
+                played = s1.isdigit() or s2.isdigit()
+            if played and not finished:
+                active = m
+                active_index = index
+
+        current_name = str(active.get("map") or "?") if active else ""
+        current_score = ""
+        if active:
+            s1, s2 = str(active.get("s1", "")), str(active.get("s2", ""))
+            if s1.isdigit() and s2.isdigit():
+                current_score = f"{s1}:{s2}"
+        if not active:
+            played_indexes = [
+                i
+                for i, item in enumerate(maps, start=1)
+                if item.get("played") or str(item.get("s1", "")).isdigit()
+            ]
+            active_index = played_indexes[-1] if played_indexes else 0
+        return {
+            "maps_score": f"{won1}:{won2}",
+            "current_map": (
+                f"{current_name} {current_score}"
+                if current_name and current_score
+                else (f"{current_name} · 比分暂未同步" if current_name else "")
+            ),
+            "current_map_name": current_name,
+            "current_score": current_score,
+            "active_map_index": active_index,
+            "map_total": len(maps),
+        }
+
+    @staticmethod
+    def _parse_match_ratings(page: Any) -> tuple[str, list[dict]]:
+        container = page.select_one(".stats-content#all-content")
+        if container is None:
+            return "", []
+        version_el = container.select_one("table.totalstats .ratingDesc")
+        version = version_el.get_text(" ", strip=True) if version_el else ""
+        teams = []
+        for table in container.find_all("table", class_="totalstats", recursive=False):
+            team_el = table.select_one(".header-row .teamName")
+            team = team_el.get_text(" ", strip=True) if team_el else "?"
+            players = []
+            for row in table.find_all("tr")[1:]:
+                nick_el = row.select_one(".player-nick")
+                rating_el = row.select_one("td.rating")
+                if nick_el is None or rating_el is None:
+                    continue
+                rating = rating_el.get_text(" ", strip=True)
+                if rating:
+                    players.append(
+                        {
+                            "nickname": nick_el.get_text(" ", strip=True),
+                            "rating": rating,
+                        }
+                    )
+            if players:
+                teams.append({"team": team, "players": players})
+        return version, teams
+
+    @classmethod
+    def _parse_match_snapshot(cls, page: Any) -> dict:
+        maps = cls._parse_match_maps(page)
+        summary = cls.summarize_map_scores(maps)
+        countdown_el = page.select_one(".countdown")
+        countdown = countdown_el.get_text(" ", strip=True).lower() if countdown_el else ""
+        finished = "match over" in countdown
+
+        team1_el = page.select_one(".team1-gradient .teamName")
+        team2_el = page.select_one(".team2-gradient .teamName")
+        event_el = page.select_one(".timeAndEvent .event")
+        version, ratings = cls._parse_match_ratings(page) if finished else ("", [])
+        return {
+            **summary,
+            "status": "finished" if finished else "live",
+            "team1": team1_el.get_text(" ", strip=True) if team1_el else "?",
+            "team2": team2_el.get_text(" ", strip=True) if team2_el else "?",
+            "event": event_el.get_text(" ", strip=True) if event_el else "",
+            "maps": maps,
+            "rating_version": version,
+            "ratings": ratings,
+        }
+
+    async def get_match_snapshot(
+        self, match_id: Any, url: str, *, watch: bool = False
+    ) -> dict:
         if not url:
             raise HltvError("该比赛没有详情页链接。")
 
-        async def fetch() -> list[dict]:
+        async def fetch() -> dict:
             page = await self._fetch_raw(url)
-            return self._parse_match_maps(page)
+            return self._parse_match_snapshot(page)
 
-        ttl = min(float(self._cache_ttl or _LIVE_TTL), _LIVE_TTL)
-        return await self._cached_locked(f"live_score:{match_id}", fetch, ttl=ttl)
+        ttl = min(float(self._cache_ttl or _LIVE_TTL), 20 if watch else _LIVE_TTL)
+        channel = "watch" if watch else "view"
+        return await self._cached_locked(
+            f"match_snapshot:{channel}:{match_id}", fetch, ttl=ttl
+        )
+
+    async def get_live_score(self, match_id: Any, url: str) -> list[dict]:
+        """兼容旧调用：从统一比赛快照中只返回地图列表。"""
+        snapshot = await self.get_match_snapshot(match_id, url)
+        return list(snapshot.get("maps") or [])
 
     # ---------------------------------------------------------------- 排名
 

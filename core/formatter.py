@@ -2,7 +2,7 @@
 
 全部是无状态纯函数，字段访问一律防御式——上游解析失败时字段可能
 缺失或为哨兵值（None/'None'/'0'/''），格式化层不应因此抛异常或把
-Python 哨兵漏给用户。想换输出形式（图片卡片、转发消息等）只改本文件。
+Python 哨兵漏给用户。战队/选手图片卡由 renderer.py 负责，本文件保留文本回退。
 """
 
 from typing import Any
@@ -130,26 +130,89 @@ def format_live(
         return "🔴 当前没有正在进行的比赛。"
     lines = []
     if matches:
-        lines.append("🔴 正在进行的比赛")
+        lines.append(f"🔴 LIVE CENTER  |  {len(matches)} 场进行中")
         if note:
             lines.append(note)
-        for m in matches:
+        for index, m in enumerate(matches, start=1):
             stars = "★" * int(m.get("rating") or 0)
-            score = str(m.get("maps_score", "")).strip()
-            mid = f" {score} " if score else " vs "
-            matchup = f"{m.get('team1') or '?'}{mid}{m.get('team2') or '?'}  {stars}".rstrip()
+            team1 = str(m.get("team1") or "?")
+            team2 = str(m.get("team2") or "?")
+            series = str(m.get("maps_score") or "0:0")
             event = str(m.get("event", "")).strip()
-            cur = str(m.get("current_map", "")).strip()
-            if cur:
-                lines.append(f"· {cur}\n  {matchup}")
+            map_name = str(m.get("current_map_name") or "").strip()
+            current_score = str(m.get("current_score") or "").strip()
+            legacy_current = str(m.get("current_map") or "").strip()
+            if map_name and current_score:
+                small = f"{map_name}   {team1} {current_score} {team2}"
+            elif map_name:
+                small = f"{map_name}   比分暂未同步"
+            elif legacy_current:
+                small = legacy_current.removeprefix("当前 ")
             else:
-                lines.append(f"· {matchup}")
-            if event:
-                lines.append(f"  {event}")
+                small = "当前地图暂未同步"
+            lines.extend(
+                [
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    f"MATCH {index:02d}  |  LIVE  {stars}".rstrip(),
+                    f"小局  {small}",
+                    f"大局  {team1} {series} {team2}",
+                    f"赛事  {event or '赛事信息暂缺'}",
+                ]
+            )
     if delayed:
+        if lines:
+            lines.append("━━━━━━━━━━━━━━━━━━━━")
         lines.append("⏳ 已过开赛时间（延迟或刚开打，暂无直播数据）")
         for m in delayed[:5]:
             lines.append(_match_line(m))
+    return "\n".join(lines)
+
+
+def format_map_started(snapshot: dict) -> str:
+    team1 = str(snapshot.get("team1") or "?")
+    team2 = str(snapshot.get("team2") or "?")
+    name = str(snapshot.get("current_map_name") or "新地图")
+    index = int(snapshot.get("active_map_index") or 0)
+    total = int(snapshot.get("map_total") or 0)
+    series = str(snapshot.get("maps_score") or "0:0")
+    position = f"MAP {index}/{total}" if total else f"MAP {index}"
+    current = str(snapshot.get("current_score") or "")
+    small = f"{team1} {current} {team2}" if current else "比分暂未同步"
+    event = str(snapshot.get("event") or "赛事信息暂缺")
+    return "\n".join(
+        [
+            f"🗺️ {position}  |  {name} 已开始",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"小局  {small}",
+            f"大局  {team1} {series} {team2}",
+            f"赛事  {event}",
+        ]
+    )
+
+
+def format_match_finished(snapshot: dict) -> str:
+    team1 = str(snapshot.get("team1") or "?")
+    team2 = str(snapshot.get("team2") or "?")
+    series = str(snapshot.get("maps_score") or "?:?")
+    version = str(snapshot.get("rating_version") or "")
+    event = str(snapshot.get("event") or "赛事信息暂缺")
+    lines = [
+        "🏁 MATCH FINISHED",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"赛果  {team1} {series} {team2}",
+        f"赛事  {event}",
+    ]
+    ratings = list(snapshot.get("ratings") or [])
+    if ratings:
+        lines.extend(["━━━━━━━━━━━━━━━━━━━━", f"RATING {version}".rstrip()])
+        for team in ratings:
+            players = "  |  ".join(
+                f"{item.get('nickname', '?')} {item.get('rating', '?')}"
+                for item in team.get("players", [])
+            )
+            lines.append(f"{team.get('team', '?')}\n{players or '暂未同步'}")
+    else:
+        lines.append("Rating 数据暂未同步。")
     return "\n".join(lines)
 
 
@@ -345,14 +408,15 @@ def format_news_detail(title: str, paragraphs: list[str], url: str) -> str:
 HELP_TEXT = """🎮 HLTV 查询插件
 /hltv today — 今日赛程（大赛）
 /hltv matches [天数] — 近期大赛
-/hltv live [队名] — 正在进行的比赛（默认只看大赛，带队名只看该队）
+/hltv live [队名] — 直播小局/大局比分（带队名会自动订阅）
+/hltv live 取消 — 取消你的直播提醒
 /hltv results [天数] — 近期赛果
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名
 /hltv ranking hltv — HLTV 自家排名
 /hltv events — 近期赛事
-/hltv team <名称> — 战队信息（任意战队，支持空格）
-/hltv player <昵称> — 选手信息（任意选手）
+/hltv team <名称> — 战队详情图片卡（任意战队，支持空格）
+/hltv player <昵称> — 选手生涯荣誉图片卡
 /hltv news [序号] — 今日新闻（带序号看详情，自动翻译）
 /hltv sub — 在本会话订阅每日赛程推送（unsub 退订）
 /hltv help — 显示本帮助

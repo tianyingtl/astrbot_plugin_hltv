@@ -16,6 +16,12 @@
     "type": "bool",
     "default": true
   },
+  "live_poll_interval": {
+    "description": "直播订阅检查间隔（秒）",
+    "type": "int",
+    "hint": "通过 /hltv live <队名> 订阅后，按此间隔检查新地图和完赛 Rating。实际限制为 20-300 秒。",
+    "default": 45
+  },
   "enable_push": {
     "description": "开启每日定时推送今日赛程",
     "type": "bool",

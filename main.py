@@ -4,6 +4,8 @@
     main.py             指令注册、参数解析、翻译/推送编排（本文件）
     core/client.py      HLTV 数据访问（缓存、限流、自建解析器）
     core/formatter.py   数据 → 文本消息
+    core/renderer.py    战队/选手图片卡渲染
+    core/subscriptions.py 直播提醒持久化与状态流转
     core/translator.py  微软翻译（免费 Edge 通道）
 """
 
@@ -11,6 +13,7 @@ import asyncio
 import difflib
 import re
 from datetime import timedelta
+from time import time
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -27,6 +30,11 @@ from .core.client import (
     HltvError,
     results_key,
     vrs_key,
+)
+from .core.renderer import render_player_card, render_team_card
+from .core.subscriptions import (
+    LiveSubscriptionStore,
+    advance_subscription,
 )
 from .core.translator import Translator
 
@@ -73,6 +81,11 @@ class HltvPlugin(Star):
         # 展示用的时间取解析结果，配置串无效回退 09:00 时不给用户看原始串
         self.push_time = "{:02d}:{:02d}".format(*self._push_hm)
         self._push_task: asyncio.Task | None = None
+        self.live_poll_interval = max(
+            20, min(int(config.get("live_poll_interval", 45)), 300)
+        )
+        self._live_watch_task: asyncio.Task | None = None
+        self.live_subscriptions = LiveSubscriptionStore()
 
         self.client = HltvClient(
             proxy_list=[p for p in (config.get("proxy_list") or []) if p],
@@ -81,7 +94,7 @@ class HltvPlugin(Star):
             tz=str(config.get("timezone", "Asia/Shanghai")),
             cache_ttl=int(config.get("cache_ttl", 300)),
         )
-        self.translator = Translator()
+        self.translator = Translator(timeout=max(30, int(config.get("timeout", 15))))
 
     # ------------------------------------------------------------------ 工具
 
@@ -143,6 +156,49 @@ class HltvPlugin(Star):
         if cache_key is not None and self.client.is_fresh(cache_key):
             return None
         return event.plain_result("🔎 正在查询 HLTV，稍等…")
+
+    @staticmethod
+    def _sender_id(event: AstrMessageEvent) -> str:
+        getter = getattr(event, "get_sender_id", None)
+        return str(getter() or "") if callable(getter) else ""
+
+    @staticmethod
+    def _sender_name(event: AstrMessageEvent) -> str:
+        getter = getattr(event, "get_sender_name", None)
+        return str(getter() or "") if callable(getter) else ""
+
+    def _ensure_live_watch_task(self) -> None:
+        if self._live_watch_task is None or self._live_watch_task.done():
+            self._live_watch_task = asyncio.create_task(self._live_watch_loop())
+
+    @staticmethod
+    def _has_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u3400-\u9fff]", str(text)))
+
+    @classmethod
+    def _is_chinese_translation(cls, source: str, translated: str) -> bool:
+        source, translated = str(source).strip(), str(translated).strip()
+        if not source:
+            return True
+        if cls._has_cjk(source):
+            return True
+        return translated != source and cls._has_cjk(translated)
+
+    async def _translate_to_chinese(self, texts: list[str]) -> list[str]:
+        """翻译失败时重试一次；只把确实含中文的结果视为成功。"""
+        source = [str(text) for text in texts]
+        translated = await self.translator.translate(source)
+        unresolved = [
+            index
+            for index, (raw, zh) in enumerate(zip(source, translated))
+            if raw.strip() and not self._is_chinese_translation(raw, zh)
+        ]
+        if unresolved:
+            retried = await self.translator.translate([source[index] for index in unresolved])
+            for index, zh in zip(unresolved, retried):
+                if self._is_chinese_translation(source[index], zh):
+                    translated[index] = zh
+        return translated
 
     async def _fetch_today_view(self) -> tuple[list[dict], str]:
         """今日赛程 + 空结果自动回退：配置了星级/关键词过滤但过滤后为空时，
@@ -213,6 +269,17 @@ class HltvPlugin(Star):
     async def live(self, event: AstrMessageEvent, name: str = ""):
         """正在进行的比赛（默认只看大赛，带比分）；可带队名只看该队"""
         name = self._rest_after(event, {"live", "直播"}, name)
+        if name.lower() in {"cancel", "取消", "退订", "取消订阅"}:
+            removed = self.live_subscriptions.remove_user(
+                str(event.unified_msg_origin), self._sender_id(event)
+            )
+            message = (
+                f"已取消 {removed} 场直播提醒。"
+                if removed
+                else "当前没有你的直播提醒。"
+            )
+            yield event.plain_result(message)
+            return
         if tip := self._waiting_tip(event, MATCHES_RAW_KEY):
             yield tip
         if name:
@@ -236,16 +303,38 @@ class HltvPlugin(Star):
             except HltvError as e:
                 yield event.plain_result(str(e))
                 return
+            watched = 0
+            already_watching = 0
+            sender_id = self._sender_id(event)
+            sender_name = self._sender_name(event)
+            umo = str(event.unified_msg_origin)
             for m in mine[:2]:
                 try:
-                    maps = await self.client.get_live_score(
+                    snapshot = await self.client.get_match_snapshot(
                         m.get("id"), m.get("url", "")
                     )
-                    m.update(self.client.summarize_map_scores(maps))
+                    m.update(snapshot)
+                    if sender_id:
+                        if self.live_subscriptions.add(
+                            m,
+                            snapshot,
+                            umo=umo,
+                            user_id=sender_id,
+                            user_name=sender_name,
+                        ):
+                            watched += 1
+                        else:
+                            already_watching += 1
                 except HltvError as e:
                     logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
             if mine:
-                yield event.plain_result(formatter.format_live(mine))
+                text = formatter.format_live(mine)
+                if watched:
+                    self._ensure_live_watch_task()
+                    text += f"\n\n已订阅 {watched} 场：新地图开始和完赛 Rating 会 @ 你。"
+                elif already_watching:
+                    text += "\n\n这场比赛已在监听；新地图开始和完赛时会 @ 你。"
+                yield event.plain_result(text)
             else:
                 yield event.plain_result(
                     formatter.format_team_not_live(name, upcoming)
@@ -271,11 +360,13 @@ class HltvPlugin(Star):
         # 比分在单场详情页,逐场抓取代价高,只取前几场
         for m in data[:4]:
             try:
-                maps = await self.client.get_live_score(m.get("id"), m.get("url", ""))
+                snapshot = await self.client.get_match_snapshot(
+                    m.get("id"), m.get("url", "")
+                )
             except HltvError as e:
                 logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
                 continue
-            m.update(self.client.summarize_map_scores(maps))
+            m.update(snapshot)
         yield event.plain_result(formatter.format_live(data, note, delayed))
 
     @hltv.command("results", alias={"赛果", "结果"})
@@ -357,7 +448,12 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(formatter.format_team(data))
+        try:
+            card = await asyncio.to_thread(render_team_card, data)
+            yield event.image_result(str(card))
+        except Exception as e:
+            logger.warning(f"[hltv] 战队卡片渲染失败，回退文本: {e!r}")
+            yield event.plain_result(formatter.format_team(data))
 
     @hltv.command("player", alias={"选手"})
     async def player(self, event: AstrMessageEvent, nickname: str = ""):
@@ -373,7 +469,12 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.plain_result(formatter.format_player(data))
+        try:
+            card = await asyncio.to_thread(render_player_card, data)
+            yield event.image_result(str(card))
+        except Exception as e:
+            logger.warning(f"[hltv] 选手卡片渲染失败，回退文本: {e!r}")
+            yield event.plain_result(formatter.format_player(data))
 
     @hltv.command("news", alias={"新闻"})
     async def news(self, event: AstrMessageEvent, index: int = 0):
@@ -402,7 +503,7 @@ class HltvPlugin(Star):
             if not paras and item.get("desc"):
                 paras = [str(item["desc"])]
             if self.translate_news:
-                translated = await self.translator.translate([title] + paras)
+                translated = await self._translate_to_chinese([title] + paras)
                 title, paras = translated[0], translated[1:]
             yield event.plain_result(
                 formatter.format_news_detail(title, paras, item["url"])
@@ -411,13 +512,23 @@ class HltvPlugin(Star):
         # 列表：只翻译将要展示的条目，且缓存过的不重复翻译
         shown = items[: self.max_items] if self.max_items > 0 else items
         if self.translate_news:
-            pending = [it for it in shown if not it.get("title_zh")]
+            pending = [
+                it
+                for it in shown
+                if not self._is_chinese_translation(
+                    str(it.get("title") or ""), str(it.get("title_zh") or "")
+                )
+            ]
             if pending:
-                translated = await self.translator.translate(
+                translated = await self._translate_to_chinese(
                     [str(it.get("title", "")) for it in pending]
                 )
                 for it, zh in zip(pending, translated):
-                    it["title_zh"] = zh
+                    source = str(it.get("title") or "")
+                    if self._is_chinese_translation(source, zh):
+                        it["title_zh"] = zh
+                    else:
+                        it.pop("title_zh", None)
         yield event.plain_result(formatter.format_news(items, self.max_items))
 
     @staticmethod
@@ -534,6 +645,7 @@ class HltvPlugin(Star):
         if self.enable_push and self._push_task is None:
             self._push_task = asyncio.create_task(self._push_loop())
             logger.info(f"[hltv] 每日推送已启动（{self.push_time}）")
+        self._ensure_live_watch_task()
 
     def _seconds_until_push(self) -> float:
         h, m = self._push_hm
@@ -574,12 +686,80 @@ class HltvPlugin(Star):
             except Exception as e:
                 logger.warning(f"[hltv] 推送到 {umo} 失败: {e!r}")
 
+    async def _live_watch_loop(self):
+        while True:
+            try:
+                await self._poll_live_subscriptions()
+                await asyncio.sleep(self.live_poll_interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[hltv] 直播提醒循环异常: {e!r}")
+                await asyncio.sleep(self.live_poll_interval)
+
+    async def _poll_live_subscriptions(self):
+        subscriptions = self.live_subscriptions.all()
+        now = int(time())
+        active = []
+        for item in subscriptions:
+            if now - int(item.get("created_at") or now) >= 12 * 60 * 60:
+                self.live_subscriptions.remove(item)
+            else:
+                active.append(item)
+        grouped: dict[tuple[str, str], list[dict]] = {}
+        for item in active:
+            key = (str(item.get("match_id") or ""), str(item.get("url") or ""))
+            grouped.setdefault(key, []).append(item)
+
+        for (match_id, url), subscribers in grouped.items():
+            try:
+                snapshot = await self.client.get_match_snapshot(match_id, url, watch=True)
+            except HltvError as e:
+                logger.warning(f"[hltv] 直播提醒查询失败({match_id}): {e}")
+                continue
+            for item in subscribers:
+                if not self.live_subscriptions.contains(item):
+                    continue
+                updated, events, finished = advance_subscription(item, snapshot, now=now)
+                if not events:
+                    self.live_subscriptions.update(updated)
+                    continue
+                sent = True
+                for notice in events:
+                    kind = notice.get("kind")
+                    text = (
+                        formatter.format_match_finished(snapshot)
+                        if kind == "match_finished"
+                        else formatter.format_map_started(snapshot)
+                    )
+                    try:
+                        chain = MessageChain().at(
+                            str(item.get("user_name") or item.get("user_id") or ""),
+                            str(item.get("user_id") or ""),
+                        ).message("\n" + text)
+                        await self.context.send_message(str(item.get("umo") or ""), chain)
+                    except Exception as e:
+                        sent = False
+                        logger.warning(
+                            f"[hltv] 直播提醒发送失败({match_id}, {item.get('umo')}): {e!r}"
+                        )
+                        break
+                if sent:
+                    if finished:
+                        self.live_subscriptions.remove(item)
+                    else:
+                        self.live_subscriptions.update(updated)
+
     # ---------------------------------------------------------------- 生命周期
 
     async def terminate(self):
         """插件卸载/停用时清理。"""
-        if self._push_task is not None:
-            self._push_task.cancel()
-            self._push_task = None
+        tasks = [task for task in (self._push_task, self._live_watch_task) if task]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._push_task = None
+        self._live_watch_task = None
         self.client.clear_cache()
         logger.info("[hltv] 插件已卸载")

@@ -1,3 +1,4 @@
 hltv-async-api~=0.8.3
 aiohttp
 tzdata
+Pillow>=10,<13
