@@ -2,6 +2,29 @@
 
 AstrBot 插件：在聊天里查询 [HLTV](https://www.hltv.org/)（CS2 赛事数据）。
 
+## 效果预览
+
+图片均由插件当前渲染器生成。赛事与比分使用 `2026-07-27` 查询快照和功能示例，
+实际内容会随 HLTV 数据实时更新。
+
+### NiKo 选手详情
+
+使用 `/hltv player NiKo` 查询选手资料、Rating、TOP 20、赛事冠军和 MVP 荣誉。
+
+![NiKo 选手详情卡](docs/images/player-niko.webp)
+
+### 近期赛事
+
+使用 `/hltv matches` 查看近期赛程，直播中的比赛会优先显示。
+
+![HLTV 近期赛事卡](docs/images/recent-matches.webp)
+
+### 实时比分
+
+使用 `/hltv live` 查看直播比赛；每场比赛的小局比分在上，大局比分在下。
+
+![HLTV 实时比分卡](docs/images/live-score.webp)
+
 ## 指令
 
 | 指令 | 说明 |
