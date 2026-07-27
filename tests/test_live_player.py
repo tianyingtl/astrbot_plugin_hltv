@@ -2,6 +2,7 @@ import sys
 import tempfile
 import types
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -325,6 +326,80 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
             referer=result["url"],
             session=fake_hltv.session,
             proxy=None,
+        )
+
+    def test_browser_fingerprint_session_downloads_official_cdn_image(self):
+        output = BytesIO()
+        Image.new("RGB", (800, 900), "white").save(output, "JPEG")
+        image_body = output.getvalue()
+        article_url = "https://www.hltv.org/news/43505/top-20-players-of-2025-niko-18"
+        image_url = "https://img-cdn.hltv.org/gallerypicture/niko-top18.png"
+
+        class FakeResponse:
+            def __init__(self, url, body):
+                self.status_code = 200
+                self.url = url
+                self.content = body
+
+        class FakeCurlSession:
+            instance = None
+
+            def __init__(self, **kwargs):
+                self.options = kwargs
+                self.calls = []
+                self.closed = False
+                FakeCurlSession.instance = self
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                body = image_body if url == image_url else b"<html></html>"
+                return FakeResponse(url, body)
+
+            def close(self):
+                self.closed = True
+
+        with patch("core.client.CurlSession", FakeCurlSession, create=True):
+            body = HltvClient._download_top20_image_browser(
+                image_url,
+                referer=article_url,
+                proxy=None,
+                timeout=30,
+            )
+
+        session = FakeCurlSession.instance
+        self.assertEqual(body, image_body)
+        self.assertEqual(session.options["impersonate"], "chrome")
+        self.assertEqual([call[0] for call in session.calls], [image_url])
+        self.assertEqual(session.calls[0][1]["referer"], article_url)
+        self.assertTrue(session.closed)
+
+    async def test_cdn_download_uses_browser_fingerprint_route(self):
+        output = BytesIO()
+        Image.new("RGB", (800, 900), "white").save(output, "JPEG")
+        image_body = output.getvalue()
+        image_url = "https://img-cdn.hltv.org/gallerypicture/browser-route-test.png"
+        article_url = "https://www.hltv.org/news/1/top-20-test"
+        client = HltvClient(cache_ttl=0)
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "core.client.CurlSession", object()
+        ), patch.object(Path, "home", return_value=Path(tmp)), patch.object(
+            HltvClient,
+            "_download_top20_image_browser",
+            return_value=image_body,
+        ) as browser_download:
+            result = await client._download_top20_image(
+                image_url,
+                2025,
+                referer=article_url,
+            )
+
+        self.assertEqual(result.suffix, ".jpg")
+        browser_download.assert_called_once_with(
+            image_url,
+            referer=article_url,
+            proxy=None,
+            timeout=30,
         )
 
     def test_top20_player_fallback_card_renders(self):

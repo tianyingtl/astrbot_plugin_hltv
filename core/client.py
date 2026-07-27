@@ -29,6 +29,11 @@ import aiohttp
 from astrbot.api import logger
 
 try:
+    from curl_cffi.requests import Session as CurlSession
+except (ImportError, OSError):
+    CurlSession = None
+
+try:
     from hltv_async_api import Hltv
 except ImportError:
     Hltv = None
@@ -1314,6 +1319,70 @@ class HltvClient:
                 return url
         return ""
 
+    @staticmethod
+    def _download_top20_image_browser(
+        url: str,
+        *,
+        referer: str,
+        proxy: str | None,
+        timeout: int,
+    ) -> bytes:
+        if CurlSession is None:
+            raise HltvError("浏览器指纹下载组件未安装。")
+
+        image_host = urlparse(url).hostname
+        if image_host not in {"www.hltv.org", "img-cdn.hltv.org"}:
+            raise HltvError("HLTV TOP20 图片地址无效。")
+        referer_url = urlparse(referer)
+        safe_referer = (
+            referer
+            if referer_url.scheme == "https"
+            and referer_url.hostname == "www.hltv.org"
+            else "https://www.hltv.org/"
+        )
+        request_options: dict[str, Any] = {
+            "timeout": timeout,
+            "allow_redirects": True,
+        }
+        if proxy:
+            request_options["proxy"] = proxy
+
+        browser_session = None
+        try:
+            browser_session = CurlSession(impersonate="chrome")
+            response = browser_session.get(
+                url,
+                headers={
+                    "accept": "image/avif,image/webp,image/png,image/*;q=0.8"
+                },
+                referer=safe_referer,
+                **request_options,
+            )
+            status = int(response.status_code)
+            final_url = str(response.url)
+            body = bytes(response.content)
+        except HltvError:
+            raise
+        except Exception as e:
+            raise HltvError(
+                "HLTV TOP20 图片下载失败，请稍后重试或配置代理。"
+            ) from e
+        finally:
+            if browser_session is not None:
+                try:
+                    browser_session.close()
+                except Exception:
+                    pass
+
+        if urlparse(final_url).hostname not in {
+            "www.hltv.org",
+            "img-cdn.hltv.org",
+        }:
+            raise HltvError("HLTV TOP20 图片跳转到了非官方地址。")
+        if status != 200:
+            raise HltvError(f"HLTV TOP20 图片下载失败（HTTP {status}）。")
+        return body
+
     async def _download_top20_image(
         self,
         url: str,
@@ -1339,7 +1408,8 @@ class HltvClient:
             if cached.is_file() and cached.stat().st_size > 0:
                 return cached
 
-        timeout = aiohttp.ClientTimeout(total=max(15, min(self._timeout, 30)))
+        timeout_seconds = max(15, min(self._timeout, 30))
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         selected_proxy = proxy
         if session is None and selected_proxy is None and self._proxy_list:
             selected_proxy = self._proxy_list[0]
@@ -1364,16 +1434,27 @@ class HltvClient:
                     )
                 return await response.content.read(12 * 1024 * 1024 + 1)
 
-        try:
-            if session is not None:
-                body = await request(session)
-            else:
-                async with aiohttp.ClientSession() as owned_session:
-                    body = await request(owned_session)
-        except HltvError:
-            raise
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-            raise HltvError("HLTV TOP20 图片下载失败，请稍后重试或配置代理。") from e
+        if parsed.hostname == "img-cdn.hltv.org" and CurlSession is not None:
+            body = await asyncio.to_thread(
+                self._download_top20_image_browser,
+                url,
+                referer=referer,
+                proxy=selected_proxy,
+                timeout=max(30, timeout_seconds),
+            )
+        else:
+            try:
+                if session is not None:
+                    body = await request(session)
+                else:
+                    async with aiohttp.ClientSession() as owned_session:
+                        body = await request(owned_session)
+            except HltvError:
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                raise HltvError(
+                    "HLTV TOP20 图片下载失败，请稍后重试或配置代理。"
+                ) from e
 
         if body.startswith(b"\x89PNG"):
             suffix = ".png"
