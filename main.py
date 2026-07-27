@@ -305,6 +305,7 @@ class HltvPlugin(Star):
                 return
             watched = 0
             already_watching = 0
+            subscription_failures = 0
             sender_id = self._sender_id(event)
             sender_name = self._sender_name(event)
             umo = str(event.unified_msg_origin)
@@ -315,17 +316,24 @@ class HltvPlugin(Star):
                     )
                     m.update(snapshot)
                     if sender_id:
-                        if self.live_subscriptions.add(
-                            m,
-                            snapshot,
-                            umo=umo,
-                            user_id=sender_id,
-                            user_name=sender_name,
-                        ):
-                            watched += 1
+                        try:
+                            added = self.live_subscriptions.add(
+                                m,
+                                snapshot,
+                                umo=umo,
+                                user_id=sender_id,
+                                user_name=sender_name,
+                            )
+                        except OSError as e:
+                            subscription_failures += 1
+                            logger.warning(f"[hltv] 保存直播订阅失败: {e!r}")
                         else:
-                            already_watching += 1
+                            if added:
+                                watched += 1
+                            else:
+                                already_watching += 1
                 except HltvError as e:
+                    subscription_failures += 1
                     logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
             if mine:
                 text = formatter.format_live(mine)
@@ -334,6 +342,13 @@ class HltvPlugin(Star):
                     text += f"\n\n已订阅 {watched} 场：新地图开始和完赛 Rating 会 @ 你。"
                 elif already_watching:
                     text += "\n\n这场比赛已在监听；新地图开始和完赛时会 @ 你。"
+                if not sender_id:
+                    text += "\n\n当前平台未提供用户 ID，无法建立 @ 提醒。"
+                elif subscription_failures:
+                    text += (
+                        f"\n\n有 {subscription_failures} 场详情获取或订阅保存失败，"
+                        "未建立提醒，请稍后重试。"
+                    )
                 yield event.plain_result(text)
             else:
                 yield event.plain_result(
@@ -682,7 +697,11 @@ class HltvPlugin(Star):
         )
         for umo in sessions:
             try:
-                await self.context.send_message(umo, MessageChain().message(text))
+                delivered = await self.context.send_message(
+                    umo, MessageChain().message(text)
+                )
+                if delivered is False:
+                    logger.warning(f"[hltv] 未找到每日推送目标平台: {umo}")
             except Exception as e:
                 logger.warning(f"[hltv] 推送到 {umo} 失败: {e!r}")
 
@@ -737,7 +756,16 @@ class HltvPlugin(Star):
                             str(item.get("user_name") or item.get("user_id") or ""),
                             str(item.get("user_id") or ""),
                         ).message("\n" + text)
-                        await self.context.send_message(str(item.get("umo") or ""), chain)
+                        delivered = await self.context.send_message(
+                            str(item.get("umo") or ""), chain
+                        )
+                        if delivered is False:
+                            sent = False
+                            logger.warning(
+                                f"[hltv] 未找到直播提醒目标平台({match_id}, "
+                                f"{item.get('umo')})，保留订阅等待重试"
+                            )
+                            break
                     except Exception as e:
                         sent = False
                         logger.warning(

@@ -50,11 +50,13 @@ class LiveFormatTests(unittest.TestCase):
 
     def test_small_score_row_is_kept_when_hltv_has_not_synced(self):
         text = format_live(
-            [{"team1": "100 Thieves", "team2": "Spirit", "maps_score": "0:1"}]
+            [{"team1": "100 Thieves", "team2": "Spirit"}]
         )
 
         self.assertLess(text.index("小局"), text.index("大局"))
         self.assertIn("当前地图暂未同步", text)
+        self.assertIn("大局  100 Thieves vs Spirit  ·  比分暂未同步", text)
+        self.assertNotIn("0:0", text)
 
 
 class MatchSnapshotTests(unittest.TestCase):
@@ -118,6 +120,29 @@ class MatchSnapshotTests(unittest.TestCase):
         )
 
         self.assertLess(notice.index("小局"), notice.index("大局"))
+
+    def test_finished_ratings_wrap_two_players_per_line(self):
+        notice = format_match_finished(
+            {
+                "team1": "100 Thieves",
+                "team2": "Spirit",
+                "maps_score": "1:2",
+                "rating_version": "3.0",
+                "ratings": [
+                    {
+                        "team": "Spirit",
+                        "players": [
+                            {"nickname": f"player{index}", "rating": "1.00"}
+                            for index in range(1, 6)
+                        ],
+                    }
+                ],
+            }
+        )
+        rating_lines = [line for line in notice.splitlines() if line.startswith("  ")]
+
+        self.assertEqual(len(rating_lines), 3)
+        self.assertTrue(all(line.count("1.00") <= 2 for line in rating_lines))
 
 
 class LiveSubscriptionTests(unittest.TestCase):

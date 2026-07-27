@@ -137,7 +137,7 @@ def format_live(
             stars = "★" * int(m.get("rating") or 0)
             team1 = str(m.get("team1") or "?")
             team2 = str(m.get("team2") or "?")
-            series = str(m.get("maps_score") or "0:0")
+            series = str(m.get("maps_score") or "").strip()
             event = str(m.get("event", "")).strip()
             map_name = str(m.get("current_map_name") or "").strip()
             current_score = str(m.get("current_score") or "").strip()
@@ -155,7 +155,11 @@ def format_live(
                     "━━━━━━━━━━━━━━━━━━━━",
                     f"MATCH {index:02d}  |  LIVE  {stars}".rstrip(),
                     f"小局  {small}",
-                    f"大局  {team1} {series} {team2}",
+                    (
+                        f"大局  {team1} {series} {team2}"
+                        if series
+                        else f"大局  {team1} vs {team2}  ·  比分暂未同步"
+                    ),
                     f"赛事  {event or '赛事信息暂缺'}",
                 ]
             )
@@ -206,11 +210,18 @@ def format_match_finished(snapshot: dict) -> str:
     if ratings:
         lines.extend(["━━━━━━━━━━━━━━━━━━━━", f"RATING {version}".rstrip()])
         for team in ratings:
-            players = "  |  ".join(
+            players = [
                 f"{item.get('nickname', '?')} {item.get('rating', '?')}"
                 for item in team.get("players", [])
-            )
-            lines.append(f"{team.get('team', '?')}\n{players or '暂未同步'}")
+            ]
+            lines.append(str(team.get("team") or "?"))
+            if players:
+                lines.extend(
+                    "  " + "    ".join(players[index : index + 2])
+                    for index in range(0, len(players), 2)
+                )
+            else:
+                lines.append("  暂未同步")
     else:
         lines.append("Rating 数据暂未同步。")
     return "\n".join(lines)
