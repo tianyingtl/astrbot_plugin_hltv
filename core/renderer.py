@@ -700,6 +700,41 @@ def render_ranking_card(
     return _save(canvas, output_dir, f"ranking_{_safe_name(title)}.png")
 
 
+def render_top20_card(
+    players: list[dict],
+    year: int,
+    *,
+    background_path: Path | None = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    canvas, draw = _base_canvas(
+        _pick_background(background_path), centering=(0.5, 0.35)
+    )
+    _section_header(draw, f"HLTV TOP 20 / {year}", "年度选手排名  ·  数据来源 HLTV")
+    shown = sorted(
+        players, key=lambda item: int(item.get("rank") or 99)
+    )[:20]
+    if not shown:
+        draw.text((72, 330), "当前没有年度排名数据", font=_font(34, True), fill=MUTED)
+    for index, player in enumerate(shown):
+        col, row = index // 10, index % 10
+        x, y = 72 + col * 748, 288 + row * 65
+        if row:
+            draw.line((x, y - 5, x + 680, y - 5), fill=LINE, width=1)
+        rank = int(player.get("rank") or index + 1)
+        rank_color = ACCENT if rank <= 3 else MUTED
+        draw.text((x, y + 7), f"{rank:02d}", font=_font(34, True), fill=rank_color)
+        name = str(player.get("name") or "?")
+        name_font = _fit_font(draw, name, 29, 545, bold=True, minimum=21)
+        draw.text(
+            (x + 104, y + 10),
+            _ellipsize(draw, name, name_font, 545),
+            font=name_font,
+            fill=INK,
+        )
+    return _save(canvas, output_dir, f"top20_{year}.png")
+
+
 def render_events_card(
     events: list[dict],
     *,

@@ -275,6 +275,16 @@ def format_ranking(
     return "\n".join(lines) + _omitted_line(omitted)
 
 
+def format_top20(players: list[dict], year: int) -> str:
+    if not players:
+        return f"HLTV {year} 年度 TOP20 暂无数据。"
+    lines = [f"HLTV {year} 年度 TOP20"]
+    for player in sorted(players, key=lambda item: int(item.get("rank") or 99)):
+        rank = int(player.get("rank") or 0)
+        lines.append(f"#{rank:02d}  {player.get('name') or '?'}")
+    return "\n".join(lines)
+
+
 def _event_date(s: Any) -> str:
     parts = str(s).split("-")
     if len(parts) == 2 and all(p.isdigit() for p in parts):
@@ -443,7 +453,7 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名
 /hltv ranking hltv — HLTV 自家排名
-/hltv top20 [年份] — HLTV 年度 TOP20 官方总图（默认上一年）
+/hltv top20 [年份] — HLTV 年度 TOP20 榜单（默认上一年）
 /hltv events — 近期赛事
 /hltv team <名称> — 战队详情图片卡（任意战队，支持空格）
 /hltv player <昵称> — 选手生涯荣誉图片卡

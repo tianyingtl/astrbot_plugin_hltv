@@ -41,6 +41,7 @@ from .core.renderer import (
     render_ranking_card,
     render_results_card,
     render_team_card,
+    render_top20_card,
 )
 from .core.subscriptions import (
     LiveSubscriptionStore,
@@ -553,7 +554,7 @@ class HltvPlugin(Star):
 
     @hltv.command("top20", alias={"年度榜单"})
     async def top20(self, event: AstrMessageEvent, year: str = ""):
-        """HLTV 年度 TOP20 官方总图；默认上一年。"""
+        """HLTV 年度 TOP20 榜单；默认上一年。"""
         latest = self.client.latest_top20_year()
         raw_year = str(year or "").strip()
         if raw_year:
@@ -574,11 +575,23 @@ class HltvPlugin(Star):
         if tip := self._waiting_tip(event, f"top20:{selected}"):
             yield tip
         try:
-            image = await self.client.get_top20_image(selected)
+            result = await self.client.get_top20(selected)
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        yield event.image_result(str(image))
+        image = result.get("image_path")
+        if image:
+            yield event.image_result(str(image))
+            return
+        players = result.get("players") or []
+        yield await self._image_or_text(
+            event,
+            render_top20_card,
+            formatter.format_top20(players, selected),
+            players,
+            selected,
+            log_name="TOP20 卡片",
+        )
 
     @hltv.command("team", alias={"战队"})
     async def team(self, event: AstrMessageEvent, name: str = ""):

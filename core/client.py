@@ -1255,8 +1255,51 @@ class HltvClient:
         best = max(candidates, default=(0, 0, ""))
         return best[2] if best[0] > 0 else ""
 
+    @staticmethod
+    def _parse_top20_players(pages: list[Any], year: int) -> list[dict]:
+        pattern = re.compile(
+            rf"/news/\d+/top-20-players-of-{year}-(.+)-(\d+)$",
+            re.IGNORECASE,
+        )
+        title_pattern = re.compile(
+            rf"top\s*20\s+players\s+of\s+{year}\s*:\s*(.+?)\s*\((\d+)\)(?:\s|$)",
+            re.IGNORECASE,
+        )
+        players: dict[int, dict] = {}
+        for page in pages:
+            if page is None:
+                continue
+            for link in page.find_all("a", href=True):
+                href = str(link.get("href") or "").strip()
+                path = urlparse(
+                    urljoin("https://www.hltv.org/", href)
+                ).path.rstrip("/")
+                match = pattern.search(path)
+                if not match:
+                    continue
+                rank = int(match.group(2))
+                if not 1 <= rank <= 20:
+                    continue
+                text = link.get_text(" ", strip=True)
+                title_match = title_pattern.search(text)
+                name = (
+                    title_match.group(1).strip()
+                    if title_match and int(title_match.group(2)) == rank
+                    else match.group(1).replace("-", " ").strip()
+                )
+                if name:
+                    if title_match or rank not in players:
+                        players[rank] = {"rank": rank, "name": name}
+        return [players[rank] for rank in sorted(players)]
+
     async def _download_top20_image(
-        self, url: str, year: int, referer: str = "https://www.hltv.org/"
+        self,
+        url: str,
+        year: int,
+        referer: str = "https://www.hltv.org/",
+        *,
+        session: aiohttp.ClientSession | None = None,
+        proxy: str | None = None,
     ) -> Path:
         parsed = urlparse(url)
         if parsed.scheme != "https" or parsed.hostname not in {
@@ -1275,22 +1318,36 @@ class HltvClient:
                 return cached
 
         timeout = aiohttp.ClientTimeout(total=max(15, min(self._timeout, 30)))
-        proxy = self._proxy_list[0] if self._proxy_list else None
+        selected_proxy = proxy
+        if session is None and selected_proxy is None and self._proxy_list:
+            selected_proxy = self._proxy_list[0]
         headers = {
             **_BROWSER_HEADERS,
             "referer": referer,
             "accept": "image/webp,image/png,image/jpeg,image/*;q=0.8",
         }
+
+        async def request(active_session: aiohttp.ClientSession) -> bytes:
+            async with active_session.get(
+                url,
+                proxy=selected_proxy,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                if response.url.host not in {"www.hltv.org", "img-cdn.hltv.org"}:
+                    raise HltvError("HLTV TOP20 图片跳转到了非官方地址。")
+                if response.status != 200:
+                    raise HltvError(
+                        f"HLTV TOP20 图片下载失败（HTTP {response.status}）。"
+                    )
+                return await response.content.read(12 * 1024 * 1024 + 1)
+
         try:
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.get(url, proxy=proxy) as response:
-                    if response.url.host not in {"www.hltv.org", "img-cdn.hltv.org"}:
-                        raise HltvError("HLTV TOP20 图片跳转到了非官方地址。")
-                    if response.status != 200:
-                        raise HltvError(
-                            f"HLTV TOP20 图片下载失败（HTTP {response.status}）。"
-                        )
-                    body = await response.content.read(12 * 1024 * 1024 + 1)
+            if session is not None:
+                body = await request(session)
+            else:
+                async with aiohttp.ClientSession() as owned_session:
+                    body = await request(owned_session)
         except HltvError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
@@ -1313,29 +1370,114 @@ class HltvClient:
         destination.write_bytes(body)
         return destination
 
-    async def get_top20_image(self, year: int) -> Path:
-        async def fetch() -> Path:
-            archive = await self._fetch_raw(
-                f"https://www.hltv.org/news/archive/{year + 1}/january"
-            )
-            article_url = self._parse_top20_article_url(archive, year)
-            if not article_url:
-                archive = await self._fetch_raw(
-                    f"https://www.hltv.org/news/archive/{year}/december"
+    async def get_top20(self, year: int) -> dict:
+        async def fetch() -> dict:
+            if Hltv is None:
+                raise HltvError(
+                    "依赖 hltv-async-api 未安装。请在 WebUI 插件管理中安装依赖后重载插件。"
                 )
-                article_url = self._parse_top20_article_url(archive, year)
-            if not article_url:
-                raise HltvError(f"没有找到 HLTV {year} 年 TOP20 最终榜单。")
 
-            article = await self._fetch_raw(article_url)
-            image_url = self._parse_top20_image_url(article, year)
-            if not image_url:
-                raise HltvError(f"没有找到 HLTV {year} 年 TOP20 官方总图。")
-            return await self._download_top20_image(
-                image_url, year, referer=article_url
-            )
+            async def fetch_page(hltv: Any, url: str) -> Any:
+                fetcher = getattr(hltv, "_fetch", None)
+                if fetcher is None:
+                    raise HltvError(
+                        "hltv-async-api 版本不兼容（缺少 _fetch），请安装 0.8.x 版本。"
+                    )
+                page = await fetcher(url)
+                if page is None:
+                    raise HltvError("HLTV 未返回数据（可能被风控拦截）。")
+                return page
+
+            try:
+                async with Hltv(**self._hltv_opts) as hltv:
+                    january = await fetch_page(
+                        hltv,
+                        f"https://www.hltv.org/news/archive/{year + 1}/january",
+                    )
+                    december = None
+                    article_url = self._parse_top20_article_url(january, year)
+                    if not article_url:
+                        december = await fetch_page(
+                            hltv,
+                            f"https://www.hltv.org/news/archive/{year}/december",
+                        )
+                        article_url = self._parse_top20_article_url(december, year)
+                    if not article_url:
+                        players = self._parse_top20_players(
+                            [january, december], year
+                        )
+                        if len(players) == 20:
+                            return {
+                                "year": year,
+                                "image_path": None,
+                                "players": players,
+                            }
+                        raise HltvError(f"没有找到完整的 HLTV {year} 年 TOP20 榜单。")
+
+                    article = await fetch_page(hltv, article_url)
+                    image_url = self._parse_top20_image_url(article, year)
+                    download_error = None
+                    if image_url:
+                        active_proxy = None
+                        if getattr(hltv, "USE_PROXY", False):
+                            get_proxy = getattr(hltv, "_get_proxy", None)
+                            active_proxy = get_proxy() if callable(get_proxy) else None
+                        try:
+                            image_path = await self._download_top20_image(
+                                image_url,
+                                year,
+                                referer=article_url,
+                                session=getattr(hltv, "session", None),
+                                proxy=active_proxy,
+                            )
+                            return {
+                                "year": year,
+                                "image_path": image_path,
+                                "players": [],
+                            }
+                        except HltvError as e:
+                            download_error = e
+                            logger.warning(
+                                f"[hltv] {year} 年 TOP20 官方图不可用，改用榜单渲染: {e}"
+                            )
+
+                    if december is None:
+                        try:
+                            december = await fetch_page(
+                                hltv,
+                                f"https://www.hltv.org/news/archive/{year}/december",
+                            )
+                        except HltvError as e:
+                            logger.warning(f"[hltv] TOP20 十二月归档读取失败: {e}")
+                    players = self._parse_top20_players(
+                        [january, december, article], year
+                    )
+                    if len(players) == 20:
+                        return {"year": year, "image_path": None, "players": players}
+                    if players:
+                        logger.warning(
+                            f"[hltv] {year} 年 TOP20 榜单不完整: {len(players)}/20"
+                        )
+                    if download_error is not None:
+                        raise download_error
+                    raise HltvError(f"没有找到完整的 HLTV {year} 年 TOP20 榜单。")
+            except HltvError:
+                raise
+            except Exception as e:
+                logger.error(f"[hltv] 获取 {year} 年 TOP20 失败: {e!r}")
+                raise HltvError(
+                    "请求 HLTV 失败，可能是网络问题或触发了 Cloudflare 风控，"
+                    "可稍后重试或在插件配置中设置代理。"
+                ) from e
 
         return await self._cached_locked(f"top20:{year}", fetch, ttl=86400)
+
+    async def get_top20_image(self, year: int) -> Path:
+        result = await self.get_top20(year)
+        image_path = result.get("image_path")
+        if image_path:
+            return Path(image_path)
+        raise HltvError(f"HLTV {year} 年 TOP20 官方总图当前不可用。")
 
     # ---------------------------------------------------------------- 新闻
 

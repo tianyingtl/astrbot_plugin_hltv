@@ -16,7 +16,7 @@ astrbot.api = astrbot_api
 sys.modules.setdefault("astrbot", astrbot)
 sys.modules.setdefault("astrbot.api", astrbot_api)
 
-from core.client import HltvClient
+from core.client import HltvClient, HltvError
 from core.formatter import (
     format_live,
     format_map_started,
@@ -43,6 +43,7 @@ from core.renderer import (
     render_ranking_card,
     render_results_card,
     render_team_card,
+    render_top20_card,
 )
 from core.subscriptions import LiveSubscriptionStore, advance_subscription
 from core.translator import Translator
@@ -112,8 +113,22 @@ class NewsTitleTests(unittest.TestCase):
 
 
 class Top20Tests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _archive(year: int, ranks: range, *, final: bool = False):
+        links = "".join(
+            f'<a href="/news/{40000 + rank}/top-20-players-of-{year}-player-{rank}-{rank}">'
+            f'Top 20 players of {year}: Player {rank} ({rank}) 2024-01-01 10 comments</a>'
+            for rank in ranks
+        )
+        if final:
+            links += (
+                f'<a href="/news/49999/top-20-players-of-{year}-final-list">'
+                f'Top 20 players of {year}: final list</a>'
+            )
+        return BeautifulSoup(links, "lxml")
+
     async def test_top20_archive_and_official_image_are_resolved(self):
-        archive = BeautifulSoup(
+        january = BeautifulSoup(
             """
             <a href="/news/40000/unrelated">Other news</a>
             <a href="/news/40002/top-20-players-of-2023-final-three-to-be-unveiled">
@@ -140,14 +155,29 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
         )
         expected = Path("D:/temp222/top20_2023.png")
         client = HltvClient(cache_ttl=300)
-        client._fetch_raw = AsyncMock(side_effect=[archive, article])
         client._download_top20_image = AsyncMock(return_value=expected)
 
-        result = await client.get_top20_image(2023)
+        class FakeHltv:
+            USE_PROXY = False
+            session = object()
 
-        self.assertEqual(result, expected)
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def _fetch(self, url):
+                return article if "/news/40001/" in url else january
+
+        fake_hltv = FakeHltv()
+        with patch("core.client.Hltv", return_value=fake_hltv):
+            result = await client.get_top20(2023)
+
+        self.assertEqual(result["image_path"], expected)
+        self.assertEqual(result["players"], [])
         self.assertEqual(
-            client._parse_top20_article_url(archive, 2023),
+            client._parse_top20_article_url(january, 2023),
             "https://www.hltv.org/news/40001/top-20-players-of-2023-final-list",
         )
         self.assertEqual(
@@ -158,7 +188,93 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
             "https://img-cdn.hltv.org/gallerypicture/top20-2023.png",
             2023,
             referer="https://www.hltv.org/news/40001/top-20-players-of-2023-final-list",
+            session=fake_hltv.session,
+            proxy=None,
         )
+
+    async def test_top20_falls_back_to_archive_ranking_when_cdn_is_forbidden(self):
+        january = self._archive(2023, range(1, 9), final=True)
+        december = self._archive(2023, range(9, 21))
+        article = BeautifulSoup(
+            """
+            <figure>
+              <img src="https://img-cdn.hltv.org/gallerypicture/top20-2023.png"
+                   alt="Top 20 players of 2023 final ranking">
+            </figure>
+            """,
+            "lxml",
+        )
+        client = HltvClient(cache_ttl=300)
+        client._download_top20_image = AsyncMock(
+            side_effect=HltvError("HLTV TOP20 图片下载失败（HTTP 403）。")
+        )
+
+        class FakeHltv:
+            USE_PROXY = False
+            session = object()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def _fetch(self, url):
+                if url.endswith("/december"):
+                    return december
+                if "/news/49999/" in url:
+                    return article
+                return january
+
+        with patch("core.client.Hltv", return_value=FakeHltv()):
+            result = await client.get_top20(2023)
+
+        self.assertIsNone(result["image_path"])
+        self.assertEqual(len(result["players"]), 20)
+        self.assertEqual(result["players"][0], {"rank": 1, "name": "Player 1"})
+        self.assertEqual(result["players"][-1], {"rank": 20, "name": "Player 20"})
+
+    async def test_top20_uses_archive_when_year_has_no_final_list_article(self):
+        january = self._archive(2023, range(1, 16))
+        december = self._archive(2023, range(16, 21))
+        client = HltvClient(cache_ttl=300)
+        client._download_top20_image = AsyncMock()
+
+        class FakeHltv:
+            USE_PROXY = False
+            session = object()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def _fetch(self, url):
+                return december if url.endswith("/december") else january
+
+        with patch("core.client.Hltv", return_value=FakeHltv()):
+            result = await client.get_top20(2023)
+
+        self.assertIsNone(result["image_path"])
+        self.assertEqual(len(result["players"]), 20)
+        client._download_top20_image.assert_not_awaited()
+
+    def test_top20_fallback_card_renders_all_twenty_players(self):
+        players = [
+            {"rank": rank, "name": f"Player {rank}"}
+            for rank in range(1, 21)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = render_top20_card(
+                players,
+                2023,
+                background_path=CARD_BASE_BACKGROUND,
+                output_dir=Path(tmp),
+            )
+            with Image.open(output) as card:
+                self.assertEqual(card.size, CARD_SIZE)
+                self.assertIsNotNone(card.getbbox())
 
 
 class MatchSnapshotTests(unittest.TestCase):
