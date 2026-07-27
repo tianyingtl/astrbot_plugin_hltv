@@ -195,6 +195,52 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
             proxy=None,
         )
 
+    async def test_legacy_2014_prefers_fivee_player_poster(self):
+        january = self._archive(2014, range(1, 11), final=True)
+        december = self._archive(2014, range(11, 21))
+        article = BeautifulSoup(
+            """
+            <figure>
+              <img src="https://img-cdn.hltv.org/gallerypicture/top20-2014.png"
+                   alt="Top 20 players of 2014 final ranking">
+            </figure>
+            """,
+            "lxml",
+        )
+        enriched = [
+            {
+                "rank": rank,
+                "name": f"Player {rank}",
+                "image_path": Path(f"D:/cache/player-{rank}.jpg"),
+            }
+            for rank in range(1, 21)
+        ]
+        client = HltvClient(cache_ttl=0)
+        client._prepare_fivee_top20_images = AsyncMock(return_value=enriched)
+        client._download_top20_image = AsyncMock(return_value=Path("official.png"))
+
+        class FakeHltv:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def _fetch(self, url):
+                if url.endswith("/december"):
+                    return december
+                if "/news/49999/" in url:
+                    return article
+                return january
+
+        with patch("core.client.Hltv", return_value=FakeHltv()):
+            result = await client.get_top20(2014)
+
+        self.assertIsNone(result["image_path"])
+        self.assertEqual(result["players"], enriched)
+        client._prepare_fivee_top20_images.assert_awaited_once()
+        client._download_top20_image.assert_not_awaited()
+
     def test_old_top20_video_recap_and_twitter_image_are_resolved(self):
         archive = BeautifulSoup(
             '<a href="/news/14029/video-top-20-players-of-2014">Video</a>',
@@ -226,6 +272,24 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
         players = HltvClient._parse_top20_players([archive], 2014)
 
         self.assertEqual(players[0]["country"], "Sweden")
+
+    async def test_fivee_2014_image_map_uses_runtime_cache(self):
+        expected = Path("D:/cache/get-right.jpg")
+        client = HltvClient(cache_ttl=0)
+        client._download_top20_image = AsyncMock(return_value=expected)
+
+        players = await client._prepare_fivee_top20_images(
+            [{"rank": 1, "name": "GeT_RiGhT"}], 2014
+        )
+
+        self.assertEqual(players[0]["image_path"], expected)
+        self.assertEqual(
+            client._download_top20_image.await_args.args[:2],
+            (
+                "https://oss.5eplay.com/img/20160111/14524935863636.jpeg",
+                2014,
+            ),
+        )
 
     async def test_top20_falls_back_to_archive_ranking_when_cdn_is_forbidden(self):
         january = self._archive(2023, range(1, 9), final=True)
@@ -414,6 +478,7 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
         image_urls = (
             "https://img-cdn.hltv.org/gallerypicture/browser-route-test.png",
             "https://pbs.twimg.com/media/annual-recap.png",
+            "https://oss.5eplay.com/img/20160111/player.jpeg",
         )
 
         for image_url in image_urls:

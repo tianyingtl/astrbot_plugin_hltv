@@ -20,11 +20,13 @@ import json
 import re
 import time
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urljoin, urlparse
 
 import aiohttp
+from PIL import Image, UnidentifiedImageError
 
 from astrbot.api import logger
 
@@ -59,7 +61,40 @@ _MATCHES_URL = "https://www.hltv.org/matches"
 _RANKING_URL = "https://www.hltv.org/ranking/teams"
 _VRS_URL = "https://www.hltv.org/valve-ranking/teams"
 _HOME_URL = "https://www.hltv.org/"
-_TOP20_IMAGE_HOSTS = {"www.hltv.org", "img-cdn.hltv.org", "pbs.twimg.com"}
+_HLTV_TOP20_IMAGE_HOSTS = {
+    "www.hltv.org",
+    "img-cdn.hltv.org",
+    "pbs.twimg.com",
+}
+_FIVEE_ARTICLE_HOSTS = {"csgo.5eplay.com", "www.5eplay.com"}
+_FIVEE_IMAGE_HOSTS = {"oss.5eplay.com", "static.5eplay.com"}
+_TOP20_IMAGE_HOSTS = _HLTV_TOP20_IMAGE_HOSTS | _FIVEE_IMAGE_HOSTS
+
+# 5E 没有可检索的 2014 年总览页，保留已验证的历史新闻图片地址。
+_FIVEE_TOP20_IMAGE_URLS = {
+    2014: {
+        1: "https://oss.5eplay.com/img/20160111/14524935863636.jpeg",
+        2: "https://oss.5eplay.com/img/20160119/14531660389536.png",
+        3: "https://oss.5eplay.com/editor/20250411/322a39d74f70d30bff0a5619d1a5bf34.png",
+        4: "https://oss.5eplay.com/img/20160120/14532540591044.png",
+        5: "https://oss.5eplay.com/img/20160112/14525802931344.png",
+        6: "https://oss.5eplay.com/img/20160116/14529280792241.png",
+        7: "https://oss.5eplay.com/img/20160106/14520735858443.png",
+        8: "https://oss.5eplay.com/img/20150114/14212424364402.jpeg",
+        9: "https://oss.5eplay.com/img/20160116/14529270995537.png",
+        10: "https://oss.5eplay.com/img/20160115/14528296718145.png",
+        11: "https://oss.5eplay.com/img/20160120/1453282155112.png",
+        12: "https://oss.5eplay.com/img/20160122/14534490517681.png",
+        13: "https://oss.5eplay.com/img/20150113/14211514087171.jpg",
+        14: "https://oss.5eplay.com/img/20150112/14210694405477.png",
+        15: "https://oss.5eplay.com/img/20160104/14518924594400.jpeg",
+        16: "https://oss.5eplay.com/img/20150106/1420547410747.jpg",
+        17: "https://oss.5eplay.com/img/20150105/1420463112857.jpeg",
+        18: "https://oss.5eplay.com/img/20150104/14203761437431.jpeg",
+        19: "https://oss.5eplay.com/editor/20200417/531601f1f428e7dc6e56948bc966863c.jpeg",
+        20: "https://oss.5eplay.com/img/20150102/14202047791846.png",
+    }
+}
 
 _BROWSER_HEADERS = {
     "referer": "https://www.hltv.org/",
@@ -1325,6 +1360,40 @@ class HltvClient:
                         }
         return [players[rank] for rank in sorted(players)]
 
+    async def _prepare_fivee_top20_images(
+        self, players: list[dict], year: int
+    ) -> list[dict]:
+        prepared = [dict(player) for player in players]
+        image_urls = _FIVEE_TOP20_IMAGE_URLS.get(year, {})
+        if not image_urls:
+            return prepared
+
+        proxy = self._proxy_list[0] if self._proxy_list else None
+        async with aiohttp.ClientSession() as session:
+            semaphore = asyncio.Semaphore(4)
+
+            async def prepare(player: dict) -> None:
+                rank = int(player.get("rank") or 0)
+                image_url = image_urls.get(rank)
+                if not image_url or player.get("image_path"):
+                    return
+                async with semaphore:
+                    try:
+                        player["image_path"] = await self._download_top20_image(
+                            image_url,
+                            year,
+                            referer="https://csgo.5eplay.com/",
+                            session=session,
+                            proxy=proxy,
+                        )
+                    except HltvError as e:
+                        logger.warning(
+                            f"[hltv] 5E {year} 年 TOP20 第 {rank} 名图片不可用: {e}"
+                        )
+
+            await asyncio.gather(*(prepare(player) for player in prepared))
+        return prepared
+
     @staticmethod
     def _parse_top20_player_image_url(page: Any) -> str:
         allowed_hosts = {"www.hltv.org", "img-cdn.hltv.org"}
@@ -1356,14 +1425,22 @@ class HltvClient:
 
         image_host = urlparse(url).hostname
         if image_host not in _TOP20_IMAGE_HOSTS:
-            raise HltvError("HLTV TOP20 图片地址无效。")
+            raise HltvError("TOP20 图片地址无效。")
         referer_url = urlparse(referer)
-        safe_referer = (
-            referer
-            if referer_url.scheme == "https"
-            and referer_url.hostname == "www.hltv.org"
-            else "https://www.hltv.org/"
-        )
+        if image_host in _FIVEE_IMAGE_HOSTS:
+            safe_referer = (
+                referer
+                if referer_url.scheme == "https"
+                and referer_url.hostname in _FIVEE_ARTICLE_HOSTS
+                else "https://csgo.5eplay.com/"
+            )
+        else:
+            safe_referer = (
+                referer
+                if referer_url.scheme == "https"
+                and referer_url.hostname == "www.hltv.org"
+                else "https://www.hltv.org/"
+            )
         request_options: dict[str, Any] = {
             "timeout": timeout,
             "allow_redirects": True,
@@ -1399,9 +1476,9 @@ class HltvClient:
                     pass
 
         if urlparse(final_url).hostname not in _TOP20_IMAGE_HOSTS:
-            raise HltvError("HLTV TOP20 图片跳转到了非官方地址。")
+            raise HltvError("TOP20 图片跳转到了非可信地址。")
         if status != 200:
-            raise HltvError(f"HLTV TOP20 图片下载失败（HTTP {status}）。")
+            raise HltvError(f"TOP20 图片下载失败（HTTP {status}）。")
         return body
 
     async def _download_top20_image(
@@ -1415,7 +1492,7 @@ class HltvClient:
     ) -> Path:
         parsed = urlparse(url)
         if parsed.scheme != "https" or parsed.hostname not in _TOP20_IMAGE_HOSTS:
-            raise HltvError("HLTV TOP20 图片地址无效。")
+            raise HltvError("TOP20 图片地址无效。")
 
         cache_dir = Path.home() / ".astrbot_plugin_hltv" / "top20"
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1424,7 +1501,12 @@ class HltvClient:
         for suffix in (".png", ".jpg", ".webp", ".gif"):
             cached = cache_dir / f"{stem}{suffix}"
             if cached.is_file() and cached.stat().st_size > 0:
-                return cached
+                try:
+                    with Image.open(cached) as image:
+                        image.load()
+                    return cached
+                except (OSError, UnidentifiedImageError):
+                    cached.unlink(missing_ok=True)
 
         timeout_seconds = max(15, min(self._timeout, 30))
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
@@ -1445,15 +1527,16 @@ class HltvClient:
                 timeout=timeout,
             ) as response:
                 if response.url.host not in _TOP20_IMAGE_HOSTS:
-                    raise HltvError("HLTV TOP20 图片跳转到了非官方地址。")
+                    raise HltvError("TOP20 图片跳转到了非可信地址。")
                 if response.status != 200:
                     raise HltvError(
-                        f"HLTV TOP20 图片下载失败（HTTP {response.status}）。"
+                        f"TOP20 图片下载失败（HTTP {response.status}）。"
                     )
                 return await response.content.read(12 * 1024 * 1024 + 1)
 
         if (
-            parsed.hostname in {"img-cdn.hltv.org", "pbs.twimg.com"}
+            parsed.hostname
+            in {"img-cdn.hltv.org", "pbs.twimg.com"} | _FIVEE_IMAGE_HOSTS
             and CurlSession is not None
         ):
             body = await asyncio.to_thread(
@@ -1488,7 +1571,12 @@ class HltvClient:
         else:
             raise HltvError("HLTV TOP20 返回的内容不是可识别的图片。")
         if len(body) > 12 * 1024 * 1024:
-            raise HltvError("HLTV TOP20 图片超过 12MB，已停止下载。")
+            raise HltvError("TOP20 图片超过 12MB，已停止下载。")
+        try:
+            with Image.open(BytesIO(body)) as image:
+                image.load()
+        except (OSError, UnidentifiedImageError) as e:
+            raise HltvError("TOP20 图片内容损坏或无法解码。") from e
 
         destination = cache_dir / f"{stem}{suffix}"
         destination.write_bytes(body)
@@ -1531,6 +1619,9 @@ class HltvClient:
                             [january, december], year
                         )
                         if len(players) == 20:
+                            players = await self._prepare_fivee_top20_images(
+                                players, year
+                            )
                             return {
                                 "year": year,
                                 "image_path": None,
@@ -1539,6 +1630,29 @@ class HltvClient:
                         raise HltvError(f"没有找到完整的 HLTV {year} 年 TOP20 榜单。")
 
                     article = await fetch_page(hltv, article_url)
+                    prepared_players = None
+                    if year in _FIVEE_TOP20_IMAGE_URLS:
+                        if december is None:
+                            december = await fetch_page(
+                                hltv,
+                                f"https://www.hltv.org/news/archive/{year}/december",
+                            )
+                        players = self._parse_top20_players(
+                            [january, december, article], year
+                        )
+                        if len(players) == 20:
+                            prepared_players = await self._prepare_fivee_top20_images(
+                                players, year
+                            )
+                            if any(
+                                player.get("image_path")
+                                for player in prepared_players
+                            ):
+                                return {
+                                    "year": year,
+                                    "image_path": None,
+                                    "players": prepared_players,
+                                }
                     image_url = self._parse_top20_image_url(article, year)
                     download_error = None
                     if image_url:
@@ -1577,6 +1691,9 @@ class HltvClient:
                         [january, december, article], year
                     )
                     if len(players) == 20:
+                        players = prepared_players or (
+                            await self._prepare_fivee_top20_images(players, year)
+                        )
                         return {"year": year, "image_path": None, "players": players}
                     if players:
                         logger.warning(

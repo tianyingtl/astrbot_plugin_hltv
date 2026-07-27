@@ -758,33 +758,31 @@ def render_top20_card(
             except OSError:
                 pass
         if not has_photo:
-            shade = 17 + rank % 5 * 4
-            draw.rectangle(
-                (x, y, x + cell_width, y + cell_height),
-                fill=(shade, shade + 1, shade + 5, 245),
-            )
-            draw.line(
-                (x + 18, y + cell_height - 18, x + cell_width - 18, y + 18),
-                fill=(244, 190, 118, 28),
-                width=4,
-            )
-            parts = [part for part in re.split(r"[_\-\s]+", name) if part]
-            initials = "".join(part[0] for part in parts[:2]).upper() or "?"
-            initial_font = _fit_font(
-                draw, initials, 104, cell_width - 80, bold=True, minimum=64
-            )
-            bounds = draw.textbbox((0, 0), initials, font=initial_font)
-            draw.text(
-                (
-                    x
-                    + (cell_width - (bounds[2] - bounds[0])) // 2
-                    - bounds[0],
-                    y + 46,
-                ),
-                initials,
-                font=initial_font,
-                fill=(244, 190, 118, 58),
-            )
+            fallback_pool = [path for path in BACKGROUND_POOL if path.is_file()]
+            if fallback_pool:
+                seed = int(
+                    hashlib.sha256(f"{year}:{rank}:{name}".encode()).hexdigest()[:8],
+                    16,
+                )
+                fallback_path = fallback_pool[seed % len(fallback_pool)]
+                centering = (
+                    0.42 + (seed % 17) / 100,
+                    0.32 + ((seed >> 8) % 17) / 100,
+                )
+                with Image.open(fallback_path) as source:
+                    photo = ImageOps.fit(
+                        source.convert("RGB"),
+                        (cell_width, cell_height),
+                        Image.Resampling.LANCZOS,
+                        centering=centering,
+                    ).convert("RGBA")
+                photo = ImageEnhance.Color(photo).enhance(0.72)
+                canvas.alpha_composite(photo, (x, y))
+            else:
+                draw.rectangle(
+                    (x, y, x + cell_width, y + cell_height),
+                    fill=(22, 23, 28, 255),
+                )
 
         draw.rectangle(
             (x, y + 164, x + cell_width, y + cell_height),
@@ -822,7 +820,7 @@ def render_top20_card(
 
     draw.text((38, 1540), "HLTV.ORG", font=_font(22, True), fill=gold)
     draw.text(
-        (1280, 1540), "TOP 20 ARCHIVE", font=_font(22, True), fill=MUTED
+        (1110, 1540), "IMAGERY  5EPLAY", font=_font(22, True), fill=MUTED
     )
     return _save(canvas, output_dir, f"top20_{year}.png")
 
