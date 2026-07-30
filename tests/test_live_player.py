@@ -581,7 +581,7 @@ class MatchSnapshotTests(unittest.TestCase):
         self.assertIn("100 Thieves 1:1 Spirit", notice)
         self.assertIn("donk 1.61", notice)
 
-    def test_live_page_does_not_guess_score_without_scorebot(self):
+    def test_live_page_uses_finished_map_links_as_scorebot_fallback(self):
         page = BeautifulSoup(
             """
             <div class="countdown">LIVE</div>
@@ -593,6 +593,7 @@ class MatchSnapshotTests(unittest.TestCase):
                 <div class="results-left"><div class="results-team-score">7</div></div>
                 <div class="results-right won"><div class="results-team-score">13</div></div>
               </div>
+              <a class="results-stats" href="/stats/matches/mapstatsid/1/test">STATS</a>
             </div>
             <div class="mapholder">
               <div class="mapname">Anubis</div>
@@ -607,10 +608,10 @@ class MatchSnapshotTests(unittest.TestCase):
 
         snapshot = HltvClient._parse_match_snapshot(page)
 
-        self.assertEqual(snapshot["maps_score"], "")
-        self.assertEqual(snapshot["current_map_name"], "")
-        self.assertEqual(snapshot["current_score"], "")
-        self.assertEqual(snapshot["score_source"], "unavailable")
+        self.assertEqual(snapshot["maps_score"], "0:1")
+        self.assertEqual(snapshot["current_map_name"], "Anubis")
+        self.assertEqual(snapshot["current_score"], "2:10")
+        self.assertEqual(snapshot["score_source"], "page")
 
     def test_scorebot_fields_define_all_live_scores(self):
         config = {"team1_id": "10", "team2_id": "20"}
@@ -797,6 +798,66 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["current_score"], "4:6")
         self.assertNotIn("99", str(snapshot))
 
+    def test_scorebot_config_uses_last_supported_url(self):
+        page = BeautifulSoup(
+            """
+            <div id="scoreboardElement"
+                 data-scorebot-url="https://scorebot-secure.hltv.org,https://scorebot-lb.hltv.org/"
+                 data-scorebot-id="123"
+                 data-team1-id="10"
+                 data-team2-id="20"></div>
+            """,
+            "lxml",
+        )
+
+        config = HltvClient._parse_scorebot_config(page)
+
+        self.assertEqual(config["url"], "https://scorebot-lb.hltv.org")
+
+    async def test_scorebot_dependency_failure_keeps_page_scores(self):
+        page = BeautifulSoup(
+            """
+            <div class="countdown">LIVE</div>
+            <div class="team1-gradient"><div class="teamName">Liquid</div></div>
+            <div class="team2-gradient"><div class="teamName">Spirit</div></div>
+            <div class="mapholder">
+              <div class="mapname">Dust2</div>
+              <div class="results played">
+                <div class="results-left"><div class="results-team-score">7</div></div>
+                <div class="results-right won"><div class="results-team-score">13</div></div>
+              </div>
+              <a class="results-stats" href="/stats/matches/mapstatsid/1/test">STATS</a>
+            </div>
+            <div class="mapholder">
+              <div class="mapname">Anubis</div>
+              <div class="results played">
+                <div class="results-left"><div class="results-team-score">2</div></div>
+                <div class="results-right won"><div class="results-team-score">10</div></div>
+              </div>
+            </div>
+            <div id="scoreboardElement"
+                 data-scorebot-url="https://scorebot-lb.hltv.org"
+                 data-scorebot-id="123"
+                 data-team1-id="10"
+                 data-team2-id="20"></div>
+            """,
+            "lxml",
+        )
+        client = HltvClient(cache_ttl=0)
+        client._fetch_raw = AsyncMock(return_value=page)
+
+        with patch("core.client.CurlSession", None), patch(
+            "core.client.logger.warning"
+        ) as warning:
+            snapshot = await client.get_match_snapshot(
+                "123", "https://www.hltv.org/matches/123/test"
+            )
+
+        self.assertEqual(snapshot["maps_score"], "0:1")
+        self.assertEqual(snapshot["current_score"], "2:10")
+        self.assertEqual(snapshot["score_source"], "page")
+        self.assertIn("curl_cffi", warning.call_args.args[0])
+
     async def test_scorebot_polling_protocol_returns_score_event(self):
         config = {
             "url": "https://scorebot-lb.hltv.org",
@@ -852,7 +913,8 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result, score)
-        self.assertIn("readyForScores", FakeSession.instance.posts[0])
+        self.assertEqual(FakeSession.instance.posts[0], "2:40")
+        self.assertIn("readyForScores", FakeSession.instance.posts[1])
         self.assertTrue(FakeSession.instance.closed)
 
 
