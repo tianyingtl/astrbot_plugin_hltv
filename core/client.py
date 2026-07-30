@@ -58,6 +58,7 @@ _LIVE_TTL = 60
 
 _SEARCH_URL = "https://www.hltv.org/search?term={}"
 _MATCHES_URL = "https://www.hltv.org/matches"
+_SCOREBOT_HOST = "scorebot-lb.hltv.org"
 _RANKING_URL = "https://www.hltv.org/ranking/teams"
 _VRS_URL = "https://www.hltv.org/valve-ranking/teams"
 _HOME_URL = "https://www.hltv.org/"
@@ -519,9 +520,8 @@ class HltvClient:
     # ------------------------------------------------------------ 直播比分
 
     @staticmethod
-    def _parse_match_maps(page: Any) -> list[dict]:
-        """单场详情页的地图比分（服务器渲染，列表页拿不到）。
-        played 标识已经进入的地图，finished / winner 来自结果区的 won/lost 类。"""
+    def _parse_match_maps(page: Any, *, match_finished: bool) -> list[dict]:
+        """读取详情页的地图顺序；直播比分不从这里推断。"""
         maps = []
         for holder in page.find_all("div", class_="mapholder"):
             name_el = holder.find(class_="mapname")
@@ -543,7 +543,7 @@ class HltvClient:
                         "s1": scores[0],
                         "s2": scores[1],
                         "played": "played" in result_classes,
-                        "finished": winner > 0,
+                        "finished": bool(match_finished and winner),
                         "winner": winner,
                     }
                 )
@@ -551,53 +551,295 @@ class HltvClient:
 
     @staticmethod
     def summarize_map_scores(maps: list[dict]) -> dict:
-        """地图列表 → 大局比分、当前地图与当前小局比分。"""
+        """汇总已明确标记结束的地图，用于完赛页面。"""
         won1 = won2 = 0
-        active = None
         active_index = 0
-        for index, m in enumerate(maps, start=1):
-            s1, s2 = str(m.get("s1", "")), str(m.get("s2", ""))
-            finished = m.get("finished")
-            if finished is None:
-                finished = s1.isdigit() and s2.isdigit() and max(int(s1), int(s2)) >= 13
-            if finished:
-                winner = int(m.get("winner") or 0)
-                if not winner and s1.isdigit() and s2.isdigit() and s1 != s2:
-                    winner = 1 if int(s1) > int(s2) else 2
+        for index, item in enumerate(maps, start=1):
+            if item.get("played"):
+                active_index = index
+            if item.get("finished"):
+                winner = int(item.get("winner") or 0)
                 won1 += winner == 1
                 won2 += winner == 2
+        return {
+            "maps_score": f"{won1}:{won2}",
+            "current_map": "",
+            "current_map_name": "",
+            "current_score": "",
+            "active_map_index": active_index,
+            "map_total": len(maps),
+        }
 
-            played = m.get("played")
-            if played is None:
-                played = s1.isdigit() or s2.isdigit()
-            if played and not finished:
-                active = m
-                active_index = index
+    @staticmethod
+    def _parse_scorebot_config(page: Any) -> dict:
+        element = page.select_one("#scoreboardElement[data-scorebot-id]")
+        if element is None:
+            return {}
+        url = str(element.get("data-scorebot-url") or "").rstrip("/")
+        parsed = urlparse(url)
+        config = {
+            "url": url,
+            "list_id": str(element.get("data-scorebot-id") or ""),
+            "team1_id": str(element.get("data-team1-id") or ""),
+            "team2_id": str(element.get("data-team2-id") or ""),
+        }
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != _SCOREBOT_HOST
+            or not all(config.values())
+            or not all(
+                config[key].isdigit()
+                for key in ("list_id", "team1_id", "team2_id")
+            )
+        ):
+            return {}
+        return config
 
-        current_name = str(active.get("map") or "?") if active else ""
-        current_score = ""
-        if active:
-            s1, s2 = str(active.get("s1", "")), str(active.get("s2", ""))
-            if s1.isdigit() and s2.isdigit():
-                current_score = f"{s1}:{s2}"
-        if not active:
-            played_indexes = [
-                i
-                for i, item in enumerate(maps, start=1)
-                if item.get("played") or str(item.get("s1", "")).isdigit()
-            ]
-            active_index = played_indexes[-1] if played_indexes else 0
+    @staticmethod
+    def _decode_engineio_payload(payload: bytes) -> list[str]:
+        """解码 HLTV 使用的 Engine.IO 3 polling 数据帧。"""
+        if not payload:
+            return []
+        packets = []
+        cursor = 0
+        while cursor < len(payload) and payload[cursor] in (0, 1):
+            marker = payload[cursor]
+            cursor += 1
+            digits = []
+            while cursor < len(payload) and payload[cursor] != 255:
+                if payload[cursor] > 9:
+                    return []
+                digits.append(str(payload[cursor]))
+                cursor += 1
+            if not digits or cursor >= len(payload):
+                return []
+            cursor += 1
+            length = int("".join(digits))
+            packet = payload[cursor : cursor + length]
+            if len(packet) != length:
+                return []
+            cursor += length
+            if marker == 0:
+                packets.append(packet.decode("utf-8", errors="replace"))
+        if packets and cursor == len(payload):
+            return packets
+
+        text = payload.decode("utf-8", errors="replace")
+        if "\x1e" in text:
+            return [packet for packet in text.split("\x1e") if packet]
+        colon = text.find(":")
+        if colon > 0 and text[:colon].isdigit():
+            length = int(text[:colon])
+            return [text[colon + 1 : colon + 1 + length]]
+        return [text]
+
+    @classmethod
+    def _fetch_scorebot_sync(
+        cls, config: dict, *, proxy: str | None, timeout: int
+    ) -> dict | None:
+        if CurlSession is None:
+            return None
+        session = CurlSession(impersonate="chrome")
+        endpoint = f"{config['url']}/socket.io/"
+        options: dict[str, Any] = {
+            "timeout": min(max(timeout, 5), 20),
+            "allow_redirects": True,
+        }
+        if proxy:
+            options["proxy"] = proxy
+        headers = {
+            "origin": "https://www.hltv.org",
+            "referer": "https://www.hltv.org/",
+        }
+
+        def params(sid: str = "") -> dict:
+            values = {
+                "EIO": "3",
+                "transport": "polling",
+                "t": str(int(time.time() * 1000)),
+            }
+            if sid:
+                values["sid"] = sid
+            return values
+
+        def post_packet(sid: str, packet: str) -> bool:
+            body = f"{len(packet)}:{packet}"
+            response = session.post(
+                endpoint,
+                params=params(sid),
+                data=body,
+                headers={**headers, "content-type": "text/plain;charset=UTF-8"},
+                **options,
+            )
+            return int(response.status_code) == 200
+
+        try:
+            response = session.get(
+                endpoint, params=params(), headers=headers, **options
+            )
+            if int(response.status_code) != 200:
+                return None
+            handshake = next(
+                (
+                    packet
+                    for packet in cls._decode_engineio_payload(bytes(response.content))
+                    if packet.startswith("0{")
+                ),
+                "",
+            )
+            if not handshake:
+                return None
+            sid = str(json.loads(handshake[1:]).get("sid") or "")
+            if not sid:
+                return None
+
+            response = session.get(
+                endpoint, params=params(sid), headers=headers, **options
+            )
+            if int(response.status_code) != 200:
+                return None
+
+            subscription = json.dumps(
+                {"token": "", "listIds": [int(config["list_id"])]},
+                separators=(",", ":"),
+            )
+            packet = "42" + json.dumps(
+                ["readyForScores", subscription], separators=(",", ":")
+            )
+            if not post_packet(sid, packet):
+                return None
+
+            for _ in range(2):
+                response = session.get(
+                    endpoint, params=params(sid), headers=headers, **options
+                )
+                if int(response.status_code) != 200:
+                    return None
+                for incoming in cls._decode_engineio_payload(bytes(response.content)):
+                    if incoming == "2":
+                        post_packet(sid, "3")
+                        continue
+                    if not incoming.startswith("42"):
+                        continue
+                    event = json.loads(incoming[2:])
+                    if (
+                        isinstance(event, list)
+                        and len(event) >= 2
+                        and event[0] == "score"
+                        and isinstance(event[1], dict)
+                        and str(event[1].get("listId")) == config["list_id"]
+                    ):
+                        return event[1]
+            return None
+        finally:
+            session.close()
+
+    async def _fetch_scorebot(self, config: dict) -> dict | None:
+        for proxy in self._proxy_list or [None]:
+            try:
+                score = await asyncio.to_thread(
+                    self._fetch_scorebot_sync,
+                    config,
+                    proxy=proxy,
+                    timeout=self._timeout,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[hltv] scorebot 获取失败（经 {proxy or '直连'}）: {e!r}"
+                )
+                continue
+            if score is not None:
+                return score
+        return None
+
+    @staticmethod
+    def _scorebot_value(values: Any, team_id: str) -> Any:
+        if not isinstance(values, dict):
+            return None
+        if team_id in values:
+            return values[team_id]
+        try:
+            return values.get(int(team_id))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _scorebot_map_name(raw: Any) -> str:
+        name = str(raw or "").removeprefix("de_").replace("_", " ")
+        return name.title() if name else "?"
+
+    @classmethod
+    def summarize_scorebot(
+        cls, score: dict, config: dict, planned_maps: list[dict]
+    ) -> dict:
+        """按 HLTV scorebot 的 wins / mapScores 生成直播比分。"""
+        team1_id, team2_id = config["team1_id"], config["team2_id"]
+        entries = []
+        for key, value in (score.get("mapScores") or {}).items():
+            if not isinstance(value, dict):
+                continue
+            try:
+                ordinal = int(value.get("mapOrdinal") or key)
+            except (TypeError, ValueError):
+                continue
+            entries.append((ordinal, value))
+        entries.sort(key=lambda item: item[0])
+
+        maps = []
+        for ordinal, value in entries:
+            scores = value.get("scores") or {}
+            s1 = cls._scorebot_value(scores, team1_id)
+            s2 = cls._scorebot_value(scores, team2_id)
+            planned_name = (
+                str(planned_maps[ordinal - 1].get("map") or "")
+                if 0 < ordinal <= len(planned_maps)
+                else ""
+            )
+            name = planned_name or cls._scorebot_map_name(value.get("map"))
+            finished = bool(value.get("mapOver"))
+            winner = 0
+            if finished and isinstance(s1, int) and isinstance(s2, int) and s1 != s2:
+                winner = 1 if s1 > s2 else 2
+            maps.append(
+                {
+                    "map": name,
+                    "s1": str(s1) if isinstance(s1, int) else "-",
+                    "s2": str(s2) if isinstance(s2, int) else "-",
+                    "played": True,
+                    "finished": finished,
+                    "winner": winner,
+                    "ordinal": ordinal,
+                }
+            )
+
+        wins = score.get("wins") or {}
+        won1 = cls._scorebot_value(wins, team1_id)
+        won2 = cls._scorebot_value(wins, team2_id)
+        if not isinstance(won1, int) or not isinstance(won2, int):
+            won1 = sum(item["winner"] == 1 for item in maps if item["finished"])
+            won2 = sum(item["winner"] == 2 for item in maps if item["finished"])
+
+        current = maps[-1] if maps and not maps[-1]["finished"] else None
+        current_name = str(current.get("map") or "") if current else ""
+        current_score = (
+            f"{current['s1']}:{current['s2']}"
+            if current and current["s1"].isdigit() and current["s2"].isdigit()
+            else ""
+        )
+        active_index = maps[-1]["ordinal"] if maps else 0
         return {
             "maps_score": f"{won1}:{won2}",
             "current_map": (
                 f"{current_name} {current_score}"
                 if current_name and current_score
-                else (f"{current_name} · 比分暂未同步" if current_name else "")
+                else ""
             ),
             "current_map_name": current_name,
             "current_score": current_score,
             "active_map_index": active_index,
-            "map_total": len(maps),
+            "map_total": max(len(planned_maps), active_index),
+            "maps": maps,
+            "score_source": "scorebot",
         }
 
     @staticmethod
@@ -631,11 +873,22 @@ class HltvClient:
 
     @classmethod
     def _parse_match_snapshot(cls, page: Any) -> dict:
-        maps = cls._parse_match_maps(page)
-        summary = cls.summarize_map_scores(maps)
         countdown_el = page.select_one(".countdown")
         countdown = countdown_el.get_text(" ", strip=True).lower() if countdown_el else ""
         finished = "match over" in countdown
+        maps = cls._parse_match_maps(page, match_finished=finished)
+        summary = (
+            cls.summarize_map_scores(maps)
+            if finished
+            else {
+                "maps_score": "",
+                "current_map": "",
+                "current_map_name": "",
+                "current_score": "",
+                "active_map_index": 0,
+                "map_total": len(maps),
+            }
+        )
 
         team1_el = page.select_one(".team1-gradient .teamName")
         team2_el = page.select_one(".team2-gradient .teamName")
@@ -650,6 +903,7 @@ class HltvClient:
             "maps": maps,
             "rating_version": version,
             "ratings": ratings,
+            "score_source": "page" if finished else "unavailable",
         }
 
     async def get_match_snapshot(
@@ -660,7 +914,19 @@ class HltvClient:
 
         async def fetch() -> dict:
             page = await self._fetch_raw(url)
-            return self._parse_match_snapshot(page)
+            snapshot = self._parse_match_snapshot(page)
+            if snapshot["status"] != "live":
+                return snapshot
+            config = self._parse_scorebot_config(page)
+            if not config:
+                return snapshot
+            score = await self._fetch_scorebot(config)
+            if score is None:
+                return snapshot
+            snapshot.update(
+                self.summarize_scorebot(score, config, snapshot.get("maps") or [])
+            )
+            return snapshot
 
         ttl = min(float(self._cache_ttl or _LIVE_TTL), 20 if watch else _LIVE_TTL)
         channel = "watch" if watch else "view"

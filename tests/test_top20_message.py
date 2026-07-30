@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +118,58 @@ class Top20MessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([kind for kind, _value in results[0]], ["text", "image"])
         self.assertIn("Top 20 players of 2025", results[0][0][1])
         self.assertEqual(results[0][1], ("image", "official.jpg"))
+
+
+class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_command_outputs_snapshot_small_and_series_scores(self):
+        module = _load_main_module()
+
+        class Client:
+            async def get_live_matches(self, min_stars=0):
+                return [
+                    {
+                        "id": 1,
+                        "url": "https://www.hltv.org/matches/1/test",
+                        "team1": "Team A",
+                        "team2": "Team B",
+                        "event": "Test Event",
+                        "rating": 5,
+                    }
+                ]
+
+            async def get_match_snapshot(self, match_id, url):
+                return {
+                    "maps_score": "1:1",
+                    "current_map": "Nuke 18:17",
+                    "current_map_name": "Nuke",
+                    "current_score": "18:17",
+                }
+
+            async def get_delayed_matches(self, min_stars=0):
+                return []
+
+        class Event:
+            message_str = "/hltv live"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.send_waiting_tip = False
+        plugin.min_stars = 0
+        plugin.event_keywords = []
+
+        with patch.object(
+            module, "render_live_card", side_effect=RuntimeError("force text fallback")
+        ):
+            results = [result async for result in plugin.live(Event())]
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("小局  Nuke   Team A 18:17 Team B", results[0])
+        self.assertIn("大局  Team A 1:1 Team B", results[0])
+        self.assertLess(results[0].index("小局"), results[0].index("大局"))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+import asyncio
+import json
 import sys
 import tempfile
 import types
@@ -579,6 +581,116 @@ class MatchSnapshotTests(unittest.TestCase):
         self.assertIn("100 Thieves 1:1 Spirit", notice)
         self.assertIn("donk 1.61", notice)
 
+    def test_live_page_does_not_guess_score_without_scorebot(self):
+        page = BeautifulSoup(
+            """
+            <div class="countdown">LIVE</div>
+            <div class="team1-gradient"><div class="teamName">Liquid</div></div>
+            <div class="team2-gradient"><div class="teamName">Spirit</div></div>
+            <div class="mapholder">
+              <div class="mapname">Dust2</div>
+              <div class="results played">
+                <div class="results-left"><div class="results-team-score">7</div></div>
+                <div class="results-right won"><div class="results-team-score">13</div></div>
+              </div>
+            </div>
+            <div class="mapholder">
+              <div class="mapname">Anubis</div>
+              <div class="results played">
+                <div class="results-left"><div class="results-team-score">2</div></div>
+                <div class="results-right won"><div class="results-team-score">10</div></div>
+              </div>
+            </div>
+            """,
+            "lxml",
+        )
+
+        snapshot = HltvClient._parse_match_snapshot(page)
+
+        self.assertEqual(snapshot["maps_score"], "")
+        self.assertEqual(snapshot["current_map_name"], "")
+        self.assertEqual(snapshot["current_score"], "")
+        self.assertEqual(snapshot["score_source"], "unavailable")
+
+    def test_scorebot_fields_define_all_live_scores(self):
+        config = {"team1_id": "10", "team2_id": "20"}
+        score = {
+            "wins": {"10": 1, "20": 1},
+            "mapScores": {
+                "1": {
+                    "mapOrdinal": 1,
+                    "map": "de_ancient",
+                    "mapOver": True,
+                    "scores": {"10": 5, "20": 2},
+                },
+                "2": {
+                    "mapOrdinal": 2,
+                    "map": "de_nuke",
+                    "mapOver": True,
+                    "scores": {"10": 1, "20": 7},
+                },
+                "3": {
+                    "mapOrdinal": 3,
+                    "map": "de_dust2",
+                    "mapOver": False,
+                    "scores": {"10": 18, "20": 17},
+                },
+            },
+        }
+
+        summary = HltvClient.summarize_scorebot(
+            score,
+            config,
+            [{"map": "Ancient"}, {"map": "Nuke"}, {"map": "Dust2"}],
+        )
+
+        self.assertEqual(summary["maps_score"], "1:1")
+        self.assertEqual(summary["current_map_name"], "Dust2")
+        self.assertEqual(summary["current_score"], "18:17")
+        self.assertEqual(summary["active_map_index"], 3)
+        self.assertEqual([item["finished"] for item in summary["maps"]], [True, True, False])
+
+    def test_map_over_controls_state_regardless_of_score(self):
+        config = {"team1_id": "10", "team2_id": "20"}
+        cases = (
+            ({"mapOver": False, "scores": {"10": 13, "20": 0}}, "13:0"),
+            ({"mapOver": False, "scores": {"10": 2, "20": 10}}, "2:10"),
+            ({"mapOver": False, "scores": {"10": 0, "20": 2}}, "0:2"),
+        )
+
+        for current, expected in cases:
+            with self.subTest(expected=expected):
+                current.update({"mapOrdinal": 1, "map": "de_mirage"})
+                summary = HltvClient.summarize_scorebot(
+                    {"wins": {"10": 0, "20": 0}, "mapScores": {"1": current}},
+                    config,
+                    [{"map": "Mirage"}],
+                )
+                self.assertEqual(summary["current_score"], expected)
+                self.assertEqual(summary["maps_score"], "0:0")
+
+    def test_scorebot_between_maps_has_series_score_without_fake_current_map(self):
+        summary = HltvClient.summarize_scorebot(
+            {
+                "wins": {"10": 1, "20": 0},
+                "mapScores": {
+                    "1": {
+                        "mapOrdinal": 1,
+                        "map": "de_anubis",
+                        "mapOver": True,
+                        "scores": {"10": 5, "20": 2},
+                    }
+                },
+            },
+            {"team1_id": "10", "team2_id": "20"},
+            [{"map": "Anubis"}, {"map": "Mirage"}],
+        )
+
+        self.assertEqual(summary["maps_score"], "1:0")
+        self.assertEqual(summary["current_map_name"], "")
+        self.assertEqual(summary["current_score"], "")
+        self.assertEqual(summary["active_map_index"], 1)
+
     def test_map_notice_keeps_small_score_above_series_score(self):
         notice = format_map_started(
             {
@@ -616,6 +728,132 @@ class MatchSnapshotTests(unittest.TestCase):
 
         self.assertEqual(len(rating_lines), 3)
         self.assertTrue(all(line.count("1.00") <= 2 for line in rating_lines))
+
+
+class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _frame(packet: str) -> bytes:
+        body = packet.encode()
+        digits = bytes(int(digit) for digit in str(len(body)))
+        return b"\x00" + digits + b"\xff" + body
+
+    async def test_match_snapshot_uses_scorebot_instead_of_static_map_cards(self):
+        page = BeautifulSoup(
+            """
+            <div class="countdown">LIVE</div>
+            <div class="team1-gradient"><div class="teamName">Team A</div></div>
+            <div class="team2-gradient"><div class="teamName">Team B</div></div>
+            <div class="mapholder">
+              <div class="mapname">Ancient</div>
+              <div class="results played">
+                <div class="results-left won"><div class="results-team-score">99</div></div>
+                <div class="results-right lost"><div class="results-team-score">1</div></div>
+              </div>
+            </div>
+            <div class="mapholder">
+              <div class="mapname">Nuke</div>
+              <div class="results played">
+                <div class="results-left tie"><div class="results-team-score">-</div></div>
+                <div class="results-right tie"><div class="results-team-score">-</div></div>
+              </div>
+            </div>
+            <div id="scoreboardElement"
+                 data-scorebot-url="https://scorebot-lb.hltv.org"
+                 data-scorebot-id="123"
+                 data-team1-id="10"
+                 data-team2-id="20"></div>
+            """,
+            "lxml",
+        )
+        score = {
+            "listId": 123,
+            "wins": {"10": 0, "20": 1},
+            "mapScores": {
+                "1": {
+                    "mapOrdinal": 1,
+                    "map": "de_ancient",
+                    "mapOver": True,
+                    "scores": {"10": 7, "20": 13},
+                },
+                "2": {
+                    "mapOrdinal": 2,
+                    "map": "de_nuke",
+                    "mapOver": False,
+                    "scores": {"10": 4, "20": 6},
+                },
+            },
+        }
+        client = HltvClient(cache_ttl=0)
+        client._fetch_raw = AsyncMock(return_value=page)
+        client._fetch_scorebot = AsyncMock(return_value=score)
+
+        snapshot = await client.get_match_snapshot(
+            "123", "https://www.hltv.org/matches/123/test"
+        )
+
+        self.assertEqual(snapshot["score_source"], "scorebot")
+        self.assertEqual(snapshot["maps_score"], "0:1")
+        self.assertEqual(snapshot["current_map_name"], "Nuke")
+        self.assertEqual(snapshot["current_score"], "4:6")
+        self.assertNotIn("99", str(snapshot))
+
+    async def test_scorebot_polling_protocol_returns_score_event(self):
+        config = {
+            "url": "https://scorebot-lb.hltv.org",
+            "list_id": "123",
+            "team1_id": "10",
+            "team2_id": "20",
+        }
+        score = {
+            "listId": 123,
+            "wins": {"10": 1, "20": 0},
+            "mapScores": {},
+        }
+        responses = [
+            self._frame(
+                '0{"sid":"session-1","upgrades":[],"pingInterval":25000,'
+                '"pingTimeout":60000}'
+            ),
+            self._frame("40"),
+            self._frame("42" + json.dumps(["score", score], separators=(",", ":"))),
+        ]
+
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, content=b"ok"):
+                self.content = content
+
+        class FakeSession:
+            instance = None
+
+            def __init__(self, **kwargs):
+                self.options = kwargs
+                self.posts = []
+                self.closed = False
+                FakeSession.instance = self
+
+            def get(self, *_args, **_kwargs):
+                return FakeResponse(responses.pop(0))
+
+            def post(self, *_args, **kwargs):
+                self.posts.append(kwargs["data"])
+                return FakeResponse()
+
+            def close(self):
+                self.closed = True
+
+        with patch("core.client.CurlSession", FakeSession):
+            result = await asyncio.to_thread(
+                HltvClient._fetch_scorebot_sync,
+                config,
+                proxy=None,
+                timeout=10,
+            )
+
+        self.assertEqual(result, score)
+        self.assertIn("readyForScores", FakeSession.instance.posts[0])
+        self.assertTrue(FakeSession.instance.closed)
 
 
 class LiveSubscriptionTests(unittest.TestCase):

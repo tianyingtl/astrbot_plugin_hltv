@@ -1,5 +1,5 @@
 name: astrbot_plugin_hltv
 desc: HLTV 查询插件。直播比分与提醒、赛后 Rating、年度 TOP20、战队/选手图片卡、赛程赛果、双排名、中英双语新闻与每日推送。
-version: v2.1.7
+version: v2.1.8
 author: tianying
 repo: https://github.com/tianyingtl/astrbot_plugin_hltv
