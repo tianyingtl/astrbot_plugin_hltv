@@ -738,6 +738,95 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
         digits = bytes(int(digit) for digit in str(len(body)))
         return b"\x00" + digits + b"\xff" + body
 
+    def test_matches_parser_keeps_live_scorebot_team_ids(self):
+        page = BeautifulSoup(
+            """
+            <div class="match-wrapper" data-match-id="2396288"
+                 data-stars="1" live="true">
+              <a href="/matches/2396288/havu-vs-bcgame">
+                <div class="match-event" data-event-headline="Elisa Esports"></div>
+                <div class="match-teamname">HAVU</div>
+                <div class="match-teamname">BC.Game</div>
+                <span data-livescore-current-map-score=""
+                      data-livescore-team="7865"></span>
+                <span data-livescore-current-map-score=""
+                      data-livescore-team="12878"></span>
+              </a>
+            </div>
+            """,
+            "lxml",
+        )
+
+        matches = HltvClient._parse_matches_page(page)
+
+        self.assertEqual(len(matches), 1)
+        self.assertTrue(matches[0]["live"])
+        self.assertEqual(matches[0]["team1_id"], "7865")
+        self.assertEqual(matches[0]["team2_id"], "12878")
+
+    async def test_non_live_match_never_becomes_live_from_stale_scorebot(self):
+        client = HltvClient(cache_ttl=0)
+        client._get_matches_raw = AsyncMock(
+            return_value=[
+                {
+                    "id": "2395931",
+                    "live": False,
+                    "team1": "Rune Eaters",
+                    "team2": "Entropy",
+                    "team1_id": "12194",
+                    "team2_id": "12105",
+                    "rating": 0,
+                }
+            ]
+        )
+        client._fetch_scorebot = AsyncMock()
+
+        matches = await client.get_live_matches()
+
+        self.assertEqual(matches, [])
+        client._fetch_scorebot.assert_not_awaited()
+
+    async def test_live_snapshot_uses_list_ids_without_detail_page(self):
+        match = {
+            "id": "2396288",
+            "live": True,
+            "url": "https://www.hltv.org/matches/2396288/havu-vs-bcgame",
+            "team1": "HAVU",
+            "team2": "BC.Game",
+            "team1_id": "7865",
+            "team2_id": "12878",
+            "event": "Elisa Esports BreakOut Series 1",
+        }
+        score = {
+            "listId": 2396288,
+            "wins": {},
+            "mapScores": {
+                "1": {
+                    "mapOrdinal": 1,
+                    "map": "de_mirage",
+                    "mapOver": False,
+                    "scores": {"7865": 7, "12878": 11},
+                }
+            },
+        }
+        client = HltvClient(cache_ttl=0)
+        client._fetch_raw = AsyncMock(side_effect=HltvError("HTTP 403"))
+        client._fetch_scorebot = AsyncMock(return_value=score)
+
+        snapshot = await client.get_live_snapshot(match)
+
+        self.assertEqual(snapshot["team1"], "HAVU")
+        self.assertEqual(snapshot["team2"], "BC.Game")
+        self.assertEqual(snapshot["maps_score"], "0:0")
+        self.assertEqual(snapshot["current_map_name"], "Mirage")
+        self.assertEqual(snapshot["current_score"], "7:11")
+        self.assertEqual(snapshot["score_source"], "scorebot")
+        client._fetch_raw.assert_not_awaited()
+        config = client._fetch_scorebot.await_args.args[0]
+        self.assertEqual(config["list_id"], "2396288")
+        self.assertEqual(config["team1_id"], "7865")
+        self.assertEqual(config["team2_id"], "12878")
+
     async def test_match_snapshot_uses_scorebot_instead_of_static_map_cards(self):
         page = BeautifulSoup(
             """

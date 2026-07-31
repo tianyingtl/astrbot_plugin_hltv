@@ -58,6 +58,7 @@ _LIVE_TTL = 60
 
 _SEARCH_URL = "https://www.hltv.org/search?term={}"
 _MATCHES_URL = "https://www.hltv.org/matches"
+_SCOREBOT_URL = "https://scorebot-lb.hltv.org"
 _SCOREBOT_HOSTS = {"scorebot-lb.hltv.org", "scorebot-secure.hltv.org"}
 _RANKING_URL = "https://www.hltv.org/ranking/teams"
 _VRS_URL = "https://www.hltv.org/valve-ranking/teams"
@@ -409,6 +410,13 @@ class HltvClient:
                     " ", strip=True
                 )
             names = [t.get_text(strip=True) for t in w.find_all("div", class_="match-teamname")]
+            team_ids = []
+            for score in w.select(
+                "[data-livescore-current-map-score][data-livescore-team]"
+            ):
+                team_id = str(score.get("data-livescore-team") or "")
+                if team_id.isdigit() and team_id not in team_ids:
+                    team_ids.append(team_id)
             unix = None
             tdiv = w.find("div", class_="match-time")
             if tdiv is not None and tdiv.get("data-unix"):
@@ -429,6 +437,8 @@ class HltvClient:
                 "rating": stars,
                 "team1": names[0] if names else "",
                 "team2": names[1] if len(names) > 1 else "",
+                "team1_id": team_ids[0] if team_ids else "",
+                "team2_id": team_ids[1] if len(team_ids) > 1 else "",
                 "event": event,
                 "unix": unix,
                 "url": url,
@@ -617,6 +627,22 @@ class HltvClient:
             if parsed.scheme == "https" and parsed.hostname in _SCOREBOT_HOSTS:
                 return {"url": url, **config}
         return {}
+
+    @staticmethod
+    def _scorebot_config_from_match(match: dict) -> dict:
+        """列表页 data-match-id 即 scorebot listId。"""
+        config = {
+            "list_id": str(match.get("id") or ""),
+            "team1_id": str(match.get("team1_id") or ""),
+            "team2_id": str(match.get("team2_id") or ""),
+        }
+        if not all(value.isdigit() for value in config.values()):
+            return {}
+        return {
+            "url": _SCOREBOT_URL,
+            **config,
+            "referer": str(match.get("url") or _MATCHES_URL),
+        }
 
     @staticmethod
     def _decode_engineio_payload(payload: bytes) -> list[str]:
@@ -963,6 +989,27 @@ class HltvClient:
         return await self._cached_locked(
             f"match_snapshot:{channel}:{match_id}", fetch, ttl=ttl
         )
+
+    async def get_live_snapshot(self, match: dict) -> dict:
+        """读取已由 /matches 确认为直播中的比赛比分。"""
+        if not match.get("live"):
+            raise HltvError("该比赛当前不在 HLTV 直播列表中。")
+
+        config = self._scorebot_config_from_match(match)
+        if config:
+            score = await self._fetch_scorebot(config)
+            if score is not None:
+                return {
+                    "status": "live",
+                    "team1": str(match.get("team1") or "?"),
+                    "team2": str(match.get("team2") or "?"),
+                    "event": str(match.get("event") or ""),
+                    "rating_version": "",
+                    "ratings": [],
+                    **self.summarize_scorebot(score, config, []),
+                }
+
+        return await self.get_match_snapshot(match.get("id"), match.get("url", ""))
 
     async def get_live_score(self, match_id: Any, url: str) -> list[dict]:
         """兼容旧调用：从统一比赛快照中只返回地图列表。"""

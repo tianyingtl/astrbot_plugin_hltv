@@ -137,7 +137,7 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ]
 
-            async def get_match_snapshot(self, match_id, url):
+            async def get_live_snapshot(self, match):
                 return {
                     "maps_score": "1:1",
                     "current_map": "Nuke 18:17",

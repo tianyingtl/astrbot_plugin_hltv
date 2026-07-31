@@ -245,6 +245,22 @@ class HltvPlugin(Star):
     def _limit_items(self, items: list[dict]) -> list[dict]:
         return items[: self.max_items] if self.max_items > 0 else items
 
+    async def _fetch_live_scores(
+        self, matches: list[dict], limit: int
+    ) -> tuple[list[tuple[dict, dict]], int]:
+        scored = []
+        failures = 0
+        for match in matches[:limit]:
+            try:
+                snapshot = await self.client.get_live_snapshot(match)
+            except HltvError as e:
+                failures += 1
+                logger.warning(f"[hltv] 获取比分失败({match.get('id')}): {e}")
+                continue
+            match.update(snapshot)
+            scored.append((match, snapshot))
+        return scored, failures
+
     # ------------------------------------------------------------------ 指令组
 
     @filter.command_group("hltv")
@@ -355,36 +371,27 @@ class HltvPlugin(Star):
                 return
             watched = 0
             already_watching = 0
-            subscription_failures = 0
+            scored, subscription_failures = await self._fetch_live_scores(mine, 2)
             sender_id = self._sender_id(event)
             sender_name = self._sender_name(event)
             umo = str(event.unified_msg_origin)
-            for m in mine[:2]:
+            for m, snapshot in scored:
                 try:
-                    snapshot = await self.client.get_match_snapshot(
-                        m.get("id"), m.get("url", "")
-                    )
-                    m.update(snapshot)
                     if sender_id:
-                        try:
-                            added = self.live_subscriptions.add(
-                                m,
-                                snapshot,
-                                umo=umo,
-                                user_id=sender_id,
-                                user_name=sender_name,
-                            )
-                        except OSError as e:
-                            subscription_failures += 1
-                            logger.warning(f"[hltv] 保存直播订阅失败: {e!r}")
+                        added = self.live_subscriptions.add(
+                            m,
+                            snapshot,
+                            umo=umo,
+                            user_id=sender_id,
+                            user_name=sender_name,
+                        )
+                        if added:
+                            watched += 1
                         else:
-                            if added:
-                                watched += 1
-                            else:
-                                already_watching += 1
-                except HltvError as e:
+                            already_watching += 1
+                except OSError as e:
                     subscription_failures += 1
-                    logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
+                    logger.warning(f"[hltv] 保存直播订阅失败: {e!r}")
             if mine:
                 text = formatter.format_live(mine)
                 footer = ""
@@ -434,16 +441,7 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        # 比分在单场详情页,逐场抓取代价高,只取前几场
-        for m in data[:4]:
-            try:
-                snapshot = await self.client.get_match_snapshot(
-                    m.get("id"), m.get("url", "")
-                )
-            except HltvError as e:
-                logger.warning(f"[hltv] 获取比分失败({m.get('id')}): {e}")
-                continue
-            m.update(snapshot)
+        await self._fetch_live_scores(data, 4)
         fallback = formatter.format_live(data, note, delayed)
         if data:
             delayed_note = f"另有 {len(delayed)} 场延迟或刚开打" if delayed else ""
