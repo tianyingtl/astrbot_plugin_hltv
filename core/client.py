@@ -411,9 +411,7 @@ class HltvClient:
                 )
             names = [t.get_text(strip=True) for t in w.find_all("div", class_="match-teamname")]
             team_ids = []
-            for score in w.select(
-                "[data-livescore-current-map-score][data-livescore-team]"
-            ):
+            for score in w.select("[data-livescore-team]"):
                 team_id = str(score.get("data-livescore-team") or "")
                 if team_id.isdigit() and team_id not in team_ids:
                     team_ids.append(team_id)
@@ -531,42 +529,38 @@ class HltvClient:
 
     @staticmethod
     def _parse_match_maps(page: Any, *, match_finished: bool) -> list[dict]:
-        """读取详情页地图状态；已结束地图以 STATS 链接为准。"""
+        """读取详情页地图状态；直播中最后一张有数字比分的地图为当前地图。"""
         maps = []
         for holder in page.find_all("div", class_="mapholder"):
             name_el = holder.find(class_="mapname")
-            result = holder.find("div", class_="results")
-            result_classes = result.get("class") or [] if result is not None else []
-            left = holder.find(class_="results-left")
-            right = holder.find(class_="results-right")
-            left_classes = left.get("class") or [] if left is not None else []
-            right_classes = right.get("class") or [] if right is not None else []
             stats_link = holder.select_one("a.results-stats[href*='/mapstatsid/']")
             scores = [
                 e.get_text(strip=True)
                 for e in holder.find_all(class_="results-team-score")
             ]
             if len(scores) >= 2:
-                winner = 1 if "won" in left_classes else (2 if "won" in right_classes else 0)
+                started = scores[0].isdigit() and scores[1].isdigit()
+                finished = bool(started and (match_finished or stats_link))
+                winner = 0
+                if finished and scores[0] != scores[1]:
+                    winner = 1 if int(scores[0]) > int(scores[1]) else 2
                 maps.append(
                     {
                         "map": name_el.get_text(strip=True) if name_el else "?",
                         "s1": scores[0],
                         "s2": scores[1],
-                        "played": "played" in result_classes,
-                        "finished": bool(stats_link or (match_finished and winner)),
-                        "winner": winner if stats_link or match_finished else 0,
+                        "played": started,
+                        "finished": finished,
+                        "winner": winner,
                     }
                 )
 
-        # 后一张地图已经开始时，前面的已开地图必然全部结束。这个状态不依赖比分阈值。
-        played_indexes = [i for i, item in enumerate(maps) if item.get("played")]
-        for i in played_indexes[:-1]:
+        # played / won 类也用于未开地图和直播领先方，不能表示开始或结束。
+        started_indexes = [i for i, item in enumerate(maps) if item.get("played")]
+        for i in started_indexes[:-1]:
             item = maps[i]
-            if item.get("finished"):
-                continue
             s1, s2 = str(item.get("s1") or ""), str(item.get("s2") or "")
-            if s1.isdigit() and s2.isdigit() and s1 != s2:
+            if s1 != s2:
                 item["finished"] = True
                 item["winner"] = 1 if int(s1) > int(s2) else 2
         return maps
@@ -788,7 +782,8 @@ class HltvClient:
             session.close()
 
     async def _fetch_scorebot(self, config: dict) -> dict | None:
-        for proxy in self._proxy_list or [None]:
+        routes = [*self._proxy_list, None] if self._proxy_list else [None]
+        for proxy in routes:
             try:
                 score = await asyncio.to_thread(
                     self._fetch_scorebot_sync,

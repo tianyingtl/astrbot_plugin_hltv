@@ -581,7 +581,7 @@ class MatchSnapshotTests(unittest.TestCase):
         self.assertIn("100 Thieves 1:1 Spirit", notice)
         self.assertIn("donk 1.61", notice)
 
-    def test_live_page_uses_finished_map_links_as_scorebot_fallback(self):
+    def test_live_page_uses_last_scored_map_as_current_fallback(self):
         page = BeautifulSoup(
             """
             <div class="countdown">LIVE</div>
@@ -611,6 +611,71 @@ class MatchSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["maps_score"], "0:1")
         self.assertEqual(snapshot["current_map_name"], "Anubis")
         self.assertEqual(snapshot["current_score"], "2:10")
+        self.assertEqual(snapshot["score_source"], "page")
+
+    def test_live_page_does_not_advance_to_unstarted_map(self):
+        page = BeautifulSoup(
+            """
+            <div class="countdown">LIVE</div>
+            <div class="team1-gradient"><div class="teamName">SINNERS</div></div>
+            <div class="team2-gradient"><div class="teamName">Rune Eaters</div></div>
+            <div class="mapholder">
+              <div class="mapname">Dust2</div>
+              <div class="results played">
+                <div class="results-left won"><div class="results-team-score">10</div></div>
+                <div class="results-right"><div class="results-team-score">5</div></div>
+              </div>
+            </div>
+            <div class="mapholder">
+              <div class="mapname">Mirage</div>
+              <div class="results played">
+                <div class="results-left"><div class="results-team-score">-</div></div>
+                <div class="results-right"><div class="results-team-score">-</div></div>
+              </div>
+            </div>
+            """,
+            "lxml",
+        )
+
+        snapshot = HltvClient._parse_match_snapshot(page)
+
+        self.assertEqual(snapshot["maps_score"], "0:0")
+        self.assertEqual(snapshot["current_map_name"], "Dust2")
+        self.assertEqual(snapshot["current_score"], "10:5")
+        self.assertEqual(snapshot["active_map_index"], 1)
+        self.assertEqual(snapshot["score_source"], "page")
+
+    def test_live_page_counts_completed_map_before_next_starts(self):
+        page = BeautifulSoup(
+            """
+            <div class="countdown">LIVE</div>
+            <div class="team1-gradient"><div class="teamName">INOX Division</div></div>
+            <div class="team2-gradient"><div class="teamName">Falcons Force</div></div>
+            <div class="mapholder">
+              <div class="mapname">Cache</div>
+              <div class="results played">
+                <div class="results-left"><div class="results-team-score">11</div></div>
+                <div class="results-right won"><div class="results-team-score">13</div></div>
+              </div>
+              <a class="results-stats" href="/stats/matches/mapstatsid/2/test">STATS</a>
+            </div>
+            <div class="mapholder">
+              <div class="mapname">Inferno</div>
+              <div class="results played">
+                <div class="results-left"><div class="results-team-score">-</div></div>
+                <div class="results-right"><div class="results-team-score">-</div></div>
+              </div>
+            </div>
+            """,
+            "lxml",
+        )
+
+        snapshot = HltvClient._parse_match_snapshot(page)
+
+        self.assertEqual(snapshot["maps_score"], "0:1")
+        self.assertEqual(snapshot["current_map_name"], "")
+        self.assertEqual(snapshot["current_score"], "")
+        self.assertEqual(snapshot["active_map_index"], 1)
         self.assertEqual(snapshot["score_source"], "page")
 
     def test_scorebot_fields_define_all_live_scores(self):
@@ -747,9 +812,9 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
                 <div class="match-event" data-event-headline="Elisa Esports"></div>
                 <div class="match-teamname">HAVU</div>
                 <div class="match-teamname">BC.Game</div>
-                <span data-livescore-current-map-score=""
+                <span data-livescore-maps-won-for=""
                       data-livescore-team="7865"></span>
-                <span data-livescore-current-map-score=""
+                <span data-livescore-maps-won-for=""
                       data-livescore-team="12878"></span>
               </a>
             </div>
@@ -826,6 +891,29 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["list_id"], "2396288")
         self.assertEqual(config["team1_id"], "7865")
         self.assertEqual(config["team2_id"], "12878")
+
+    async def test_scorebot_tries_direct_after_configured_proxy(self):
+        score = {"listId": 2395961, "mapScores": {}, "wins": {}}
+        client = HltvClient(
+            proxy_list=["http://127.0.0.1:7890"], cache_ttl=0
+        )
+        with patch.object(
+            client, "_fetch_scorebot_sync", side_effect=[None, score]
+        ) as fetch:
+            result = await client._fetch_scorebot(
+                {
+                    "url": "https://scorebot-lb.hltv.org",
+                    "list_id": "2395961",
+                    "team1_id": "10577",
+                    "team2_id": "12194",
+                }
+            )
+
+        self.assertEqual(result, score)
+        self.assertEqual(
+            [item.kwargs["proxy"] for item in fetch.call_args_list],
+            ["http://127.0.0.1:7890", None],
+        )
 
     async def test_match_snapshot_uses_scorebot_instead_of_static_map_cards(self):
         page = BeautifulSoup(
