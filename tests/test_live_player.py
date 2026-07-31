@@ -716,6 +716,64 @@ class MatchSnapshotTests(unittest.TestCase):
         self.assertEqual(summary["active_map_index"], 3)
         self.assertEqual([item["finished"] for item in summary["maps"]], [True, True, False])
 
+    def test_scoreboard_event_overrides_legacy_current_score(self):
+        score = {
+            "listId": 123,
+            "wins": {"10": 1, "20": 0},
+            "mapScores": {
+                "1": {
+                    "mapOrdinal": 1,
+                    "map": "de_dust2",
+                    "mapOver": True,
+                    "scores": {"10": 13, "20": 8},
+                }
+            },
+            "_scoreboard": {
+                "mapName": "de_nuke",
+                "ctTeamId": 20,
+                "tTeamId": 10,
+                "ctTeamScore": 10,
+                "tTeamScore": 2,
+            },
+            "_legacy_score_available": True,
+        }
+
+        summary = HltvClient.summarize_scorebot(
+            score,
+            {"team1_id": "10", "team2_id": "20"},
+            [{"map": "Dust2"}, {"map": "Nuke"}],
+        )
+
+        self.assertEqual(summary["maps_score"], "1:0")
+        self.assertEqual(summary["current_map_name"], "Nuke")
+        self.assertEqual(summary["current_score"], "2:10")
+        self.assertEqual(summary["active_map_index"], 2)
+        self.assertEqual(summary["score_source"], "scoreboard")
+
+    def test_scoreboard_only_keeps_series_score_unknown(self):
+        summary = HltvClient.summarize_scorebot(
+            {
+                "listId": 123,
+                "wins": {},
+                "mapScores": {},
+                "_scoreboard": {
+                    "mapName": "de_nuke",
+                    "ctTeamId": 10,
+                    "tTeamId": 20,
+                    "ctTeamScore": 3,
+                    "tTeamScore": 4,
+                },
+                "_legacy_score_available": False,
+            },
+            {"team1_id": "10", "team2_id": "20"},
+            [],
+        )
+
+        self.assertEqual(summary["maps_score"], "")
+        self.assertEqual(summary["current_map_name"], "Nuke")
+        self.assertEqual(summary["current_score"], "3:4")
+        self.assertEqual(summary["active_map_index"], 1)
+
     def test_map_over_controls_state_regardless_of_score(self):
         config = {"team1_id": "10", "team2_id": "20"}
         cases = (
@@ -1035,7 +1093,7 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["score_source"], "page")
         self.assertIn("curl_cffi", warning.call_args.args[0])
 
-    async def test_scorebot_polling_protocol_returns_score_event(self):
+    async def test_scorebot_polling_protocol_returns_score_and_scoreboard(self):
         config = {
             "url": "https://scorebot-lb.hltv.org",
             "list_id": "123",
@@ -1047,12 +1105,23 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
             "wins": {"10": 1, "20": 0},
             "mapScores": {},
         }
+        scoreboard = {
+            "mapName": "de_nuke",
+            "ctTeamId": 10,
+            "tTeamId": 20,
+            "ctTeamScore": 3,
+            "tTeamScore": 4,
+        }
         responses = [
             self._frame(
                 '0{"sid":"session-1","upgrades":[],"pingInterval":25000,'
                 '"pingTimeout":60000}'
             ),
             self._frame("40"),
+            self._frame(
+                "42"
+                + json.dumps(["scoreboard", scoreboard], separators=(",", ":"))
+            ),
             self._frame("42" + json.dumps(["score", score], separators=(",", ":"))),
         ]
 
@@ -1089,9 +1158,12 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
                 timeout=10,
             )
 
-        self.assertEqual(result, score)
+        self.assertEqual(result["listId"], 123)
+        self.assertEqual(result["_scoreboard"], scoreboard)
+        self.assertTrue(result["_legacy_score_available"])
         self.assertEqual(FakeSession.instance.posts[0], "2:40")
         self.assertIn("readyForScores", FakeSession.instance.posts[1])
+        self.assertIn("readyForMatch", FakeSession.instance.posts[2])
         self.assertTrue(FakeSession.instance.closed)
 
 

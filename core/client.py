@@ -676,6 +676,21 @@ class HltvClient:
             return [text[colon + 1 : colon + 1 + length]]
         return [text]
 
+    @staticmethod
+    def _combine_scorebot_events(
+        legacy: dict | None, scoreboard: dict | None, list_id: str
+    ) -> dict | None:
+        if scoreboard is None:
+            return legacy
+        result = dict(legacy) if legacy is not None else {
+            "listId": int(list_id),
+            "wins": {},
+            "mapScores": {},
+        }
+        result["_scoreboard"] = scoreboard
+        result["_legacy_score_available"] = legacy is not None
+        return result
+
     @classmethod
     def _fetch_scorebot_sync(
         cls, config: dict, *, proxy: str | None, timeout: int
@@ -746,22 +761,39 @@ class HltvClient:
             if int(response.status_code) != 200:
                 return None
 
-            subscription = json.dumps(
+            legacy_subscription = json.dumps(
                 {"token": "", "listIds": [int(config["list_id"])]},
                 separators=(",", ":"),
             )
-            packet = "42" + json.dumps(
-                ["readyForScores", subscription], separators=(",", ":")
+            current_subscription = json.dumps(
+                {"token": "", "listId": config["list_id"]},
+                separators=(",", ":"),
             )
-            if not post_packet(sid, packet):
+            legacy_sent = post_packet(
+                sid,
+                "42"
+                + json.dumps(
+                    ["readyForScores", legacy_subscription], separators=(",", ":")
+                ),
+            )
+            current_sent = post_packet(
+                sid,
+                "42"
+                + json.dumps(
+                    ["readyForMatch", current_subscription], separators=(",", ":")
+                ),
+            )
+            if not legacy_sent and not current_sent:
                 return None
 
+            legacy = None
+            scoreboard = None
             for _ in range(2):
                 response = session.get(
                     endpoint, params=params(sid), headers=headers, **options
                 )
                 if int(response.status_code) != 200:
-                    return None
+                    break
                 for incoming in cls._decode_engineio_payload(bytes(response.content)):
                     if incoming == "2":
                         post_packet(sid, "3")
@@ -769,15 +801,24 @@ class HltvClient:
                     if not incoming.startswith("42"):
                         continue
                     event = json.loads(incoming[2:])
-                    if (
+                    if not (
                         isinstance(event, list)
                         and len(event) >= 2
-                        and event[0] == "score"
                         and isinstance(event[1], dict)
+                    ):
+                        continue
+                    if (
+                        event[0] == "score"
                         and str(event[1].get("listId")) == config["list_id"]
                     ):
-                        return event[1]
-            return None
+                        legacy = event[1]
+                    elif event[0] == "scoreboard":
+                        scoreboard = event[1]
+                if legacy is not None and scoreboard is not None:
+                    break
+            return cls._combine_scorebot_events(
+                legacy, scoreboard, config["list_id"]
+            )
         finally:
             session.close()
 
@@ -815,6 +856,41 @@ class HltvClient:
     def _scorebot_map_name(raw: Any) -> str:
         name = str(raw or "").removeprefix("de_").replace("_", " ")
         return name.title() if name else "?"
+
+    @classmethod
+    def _summarize_scoreboard(cls, scoreboard: Any, config: dict) -> dict:
+        if not isinstance(scoreboard, dict):
+            return {}
+
+        def integer(primary: str, fallback: str) -> int | None:
+            for key in (primary, fallback):
+                value = scoreboard.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+            return None
+
+        ct_id = str(scoreboard.get("ctTeamId") or "")
+        t_id = str(scoreboard.get("tTeamId") or "")
+        ct_score = integer("ctTeamScore", "counterTerroristScore")
+        t_score = integer("tTeamScore", "terroristScore")
+        team1_id, team2_id = config["team1_id"], config["team2_id"]
+        if ct_score is None or t_score is None:
+            return {}
+        if (team1_id, team2_id) == (ct_id, t_id):
+            s1, s2 = ct_score, t_score
+        elif (team1_id, team2_id) == (t_id, ct_id):
+            s1, s2 = t_score, ct_score
+        else:
+            return {}
+
+        name = cls._scorebot_map_name(scoreboard.get("mapName"))
+        return {
+            "current_map": f"{name} {s1}:{s2}",
+            "current_map_name": name,
+            "current_score": f"{s1}:{s2}",
+        }
 
     @classmethod
     def summarize_scorebot(
@@ -875,8 +951,12 @@ class HltvClient:
             else ""
         )
         active_index = maps[-1]["ordinal"] if maps else 0
-        return {
-            "maps_score": f"{won1}:{won2}",
+        summary = {
+            "maps_score": (
+                f"{won1}:{won2}"
+                if score.get("_legacy_score_available", True)
+                else ""
+            ),
             "current_map": (
                 f"{current_name} {current_score}"
                 if current_name and current_score
@@ -889,6 +969,43 @@ class HltvClient:
             "maps": maps,
             "score_source": "scorebot",
         }
+        live = cls._summarize_scoreboard(score.get("_scoreboard"), config)
+        if not live:
+            return summary
+
+        def map_key(value: Any) -> str:
+            return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+        live_name = live["current_map_name"]
+        live_key = map_key(live_name)
+        live_index = next(
+            (
+                index
+                for index, item in enumerate(planned_maps, start=1)
+                if map_key(item.get("map")) == live_key
+            ),
+            0,
+        )
+        current_item = next(
+            (item for item in maps if map_key(item.get("map")) == live_key), None
+        )
+        if current_item is not None:
+            live_index = int(current_item.get("ordinal") or live_index or 1)
+        elif not live_index:
+            live_index = (
+                max((int(item.get("ordinal") or 0) for item in maps), default=0) + 1
+                if maps
+                else 1
+            )
+        summary.update(
+            {
+                **live,
+                "active_map_index": live_index,
+                "map_total": max(len(planned_maps), len(maps), live_index),
+                "score_source": "scoreboard",
+            }
+        )
+        return summary
 
     @staticmethod
     def _parse_match_ratings(page: Any) -> tuple[str, list[dict]]:
