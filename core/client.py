@@ -31,9 +31,14 @@ from PIL import Image, UnidentifiedImageError
 from astrbot.api import logger
 
 try:
+    from curl_cffi import CurlError
+    from curl_cffi.const import CurlECode, CurlWsFlag
     from curl_cffi.requests import Session as CurlSession
 except (ImportError, OSError):
     CurlSession = None
+    CurlError = OSError
+    CurlECode = None
+    CurlWsFlag = None
 
 try:
     from hltv_async_api import Hltv
@@ -639,44 +644,6 @@ class HltvClient:
         }
 
     @staticmethod
-    def _decode_engineio_payload(payload: bytes) -> list[str]:
-        """解码 HLTV 使用的 Engine.IO 3 polling 数据帧。"""
-        if not payload:
-            return []
-        packets = []
-        cursor = 0
-        while cursor < len(payload) and payload[cursor] in (0, 1):
-            marker = payload[cursor]
-            cursor += 1
-            digits = []
-            while cursor < len(payload) and payload[cursor] != 255:
-                if payload[cursor] > 9:
-                    return []
-                digits.append(str(payload[cursor]))
-                cursor += 1
-            if not digits or cursor >= len(payload):
-                return []
-            cursor += 1
-            length = int("".join(digits))
-            packet = payload[cursor : cursor + length]
-            if len(packet) != length:
-                return []
-            cursor += length
-            if marker == 0:
-                packets.append(packet.decode("utf-8", errors="replace"))
-        if packets and cursor == len(payload):
-            return packets
-
-        text = payload.decode("utf-8", errors="replace")
-        if "\x1e" in text:
-            return [packet for packet in text.split("\x1e") if packet]
-        colon = text.find(":")
-        if colon > 0 and text[:colon].isdigit():
-            length = int(text[:colon])
-            return [text[colon + 1 : colon + 1 + length]]
-        return [text]
-
-    @staticmethod
     def _combine_scorebot_events(
         legacy: dict | None, scoreboard: dict | None, list_id: str
     ) -> dict | None:
@@ -691,76 +658,55 @@ class HltvClient:
         result["_legacy_score_available"] = legacy is not None
         return result
 
+    @staticmethod
+    def _recv_scorebot_message(ws: Any, deadline: float) -> str:
+        chunks = []
+        while time.monotonic() < deadline:
+            try:
+                chunk, frame = ws.recv_fragment()
+            except CurlError as e:
+                if CurlECode is not None and e.code == CurlECode.AGAIN:
+                    time.sleep(0.05)
+                    continue
+                raise
+            chunks.append(bytes(chunk))
+            if frame.bytesleft == 0 and not frame.flags & CurlWsFlag.CONT:
+                return b"".join(chunks).decode("utf-8", errors="replace")
+        return ""
+
     @classmethod
     def _fetch_scorebot_sync(
         cls, config: dict, *, proxy: str | None, timeout: int
     ) -> dict | None:
-        if CurlSession is None:
+        if CurlSession is None or CurlWsFlag is None:
             raise RuntimeError("curl_cffi 未安装或无法加载，不能连接 HLTV scorebot")
         session = CurlSession(impersonate="chrome")
-        endpoint = f"{config['url']}/socket.io/"
+        ws = None
+        endpoint = (
+            f"{config['url'].replace('https://', 'wss://', 1)}"
+            "/socket.io/?EIO=3&transport=websocket"
+        )
         options: dict[str, Any] = {
             "timeout": min(max(timeout, 5), 20),
             "allow_redirects": True,
+            "impersonate": "chrome",
         }
         if proxy:
             options["proxy"] = proxy
+        referer = str(config.get("referer") or "https://www.hltv.org/")
         headers = {
             "origin": "https://www.hltv.org",
-            "referer": str(config.get("referer") or "https://www.hltv.org/"),
             "accept-language": "en-US,en;q=0.9",
             "cache-control": "no-cache",
         }
 
-        def params(sid: str = "") -> dict:
-            values = {
-                "EIO": "3",
-                "transport": "polling",
-                "t": str(int(time.time() * 1000)),
-            }
-            if sid:
-                values["sid"] = sid
-            return values
-
-        def post_packet(sid: str, packet: str) -> bool:
-            body = f"{len(packet)}:{packet}"
-            response = session.post(
+        try:
+            ws = session.ws_connect(
                 endpoint,
-                params=params(sid),
-                data=body,
-                headers={**headers, "content-type": "text/plain;charset=UTF-8"},
+                headers=headers,
+                referer=referer,
                 **options,
             )
-            return int(response.status_code) == 200
-
-        try:
-            response = session.get(
-                endpoint, params=params(), headers=headers, **options
-            )
-            if int(response.status_code) != 200:
-                return None
-            handshake = next(
-                (
-                    packet
-                    for packet in cls._decode_engineio_payload(bytes(response.content))
-                    if packet.startswith("0{")
-                ),
-                "",
-            )
-            if not handshake:
-                return None
-            sid = str(json.loads(handshake[1:]).get("sid") or "")
-            if not sid:
-                return None
-
-            if not post_packet(sid, "40"):
-                return None
-            response = session.get(
-                endpoint, params=params(sid), headers=headers, **options
-            )
-            if int(response.status_code) != 200:
-                return None
-
             legacy_subscription = json.dumps(
                 {"token": "", "listIds": [int(config["list_id"])]},
                 separators=(",", ":"),
@@ -769,38 +715,44 @@ class HltvClient:
                 {"token": "", "listId": config["list_id"]},
                 separators=(",", ":"),
             )
-            legacy_sent = post_packet(
-                sid,
-                "42"
-                + json.dumps(
-                    ["readyForScores", legacy_subscription], separators=(",", ":")
-                ),
-            )
-            current_sent = post_packet(
-                sid,
-                "42"
-                + json.dumps(
-                    ["readyForMatch", current_subscription], separators=(",", ":")
-                ),
-            )
-            if not legacy_sent and not current_sent:
-                return None
-
             legacy = None
             scoreboard = None
-            for _ in range(2):
-                response = session.get(
-                    endpoint, params=params(sid), headers=headers, **options
-                )
-                if int(response.status_code) != 200:
+            subscribed = False
+            deadline = time.monotonic() + options["timeout"]
+            while time.monotonic() < deadline:
+                incoming = cls._recv_scorebot_message(ws, deadline)
+                if not incoming:
                     break
-                for incoming in cls._decode_engineio_payload(bytes(response.content)):
-                    if incoming == "2":
-                        post_packet(sid, "3")
+                if incoming.startswith("0{"):
+                    ws.send("40", CurlWsFlag.TEXT)
+                    continue
+                if incoming == "40" and not subscribed:
+                    ws.send(
+                        "42"
+                        + json.dumps(
+                            ["readyForScores", legacy_subscription],
+                            separators=(",", ":"),
+                        ),
+                        CurlWsFlag.TEXT,
+                    )
+                    ws.send(
+                        "42"
+                        + json.dumps(
+                            ["readyForMatch", current_subscription],
+                            separators=(",", ":"),
+                        ),
+                        CurlWsFlag.TEXT,
+                    )
+                    subscribed = True
+                    continue
+                if incoming == "2":
+                    ws.send("3", CurlWsFlag.TEXT)
+                    continue
+                if incoming.startswith("42"):
+                    try:
+                        event = json.loads(incoming[2:])
+                    except (TypeError, ValueError):
                         continue
-                    if not incoming.startswith("42"):
-                        continue
-                    event = json.loads(incoming[2:])
                     if not (
                         isinstance(event, list)
                         and len(event) >= 2
@@ -820,6 +772,11 @@ class HltvClient:
                 legacy, scoreboard, config["list_id"]
             )
         finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
             session.close()
 
     async def _fetch_scorebot(self, config: dict) -> dict | None:
@@ -859,7 +816,7 @@ class HltvClient:
 
     @classmethod
     def _summarize_scoreboard(cls, scoreboard: Any, config: dict) -> dict:
-        if not isinstance(scoreboard, dict):
+        if not isinstance(scoreboard, dict) or scoreboard.get("live") is False:
             return {}
 
         def integer(primary: str, fallback: str) -> int | None:

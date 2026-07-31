@@ -1,5 +1,11 @@
 # 更新日志
 
+## v2.1.13 (2026-07-31)
+
+- 实时比分传输由 Engine.IO HTTP 轮询改为 Socket.IO WebSocket，避免部分 Linux 网络环境无法收到 scorebot 事件。
+- `curl-cffi` 最低版本调整为 0.15，以兼容 HLTV 当前的 WebSocket 连接校验。
+- 地图切换期间忽略尚未开局的下一张地图 `0:0`，待实时状态生效后再显示小局比分。
+
 ## v2.1.12 (2026-07-31)
 
 - 当前地图和小局比分改用 HLTV `readyForMatch / scoreboard` 实时通道，不再依赖旧 `mapScores` 事件是否可用。

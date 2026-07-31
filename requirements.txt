@@ -2,4 +2,4 @@ hltv-async-api~=0.8.3
 aiohttp
 tzdata
 Pillow>=10,<13
-curl-cffi>=0.11,<1
+curl-cffi>=0.15,<1

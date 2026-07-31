@@ -774,6 +774,37 @@ class MatchSnapshotTests(unittest.TestCase):
         self.assertEqual(summary["current_score"], "3:4")
         self.assertEqual(summary["active_map_index"], 1)
 
+    def test_inactive_scoreboard_does_not_show_next_map_zero_score(self):
+        summary = HltvClient.summarize_scorebot(
+            {
+                "listId": 123,
+                "wins": {"10": 1, "20": 0},
+                "mapScores": {
+                    "1": {
+                        "mapOrdinal": 1,
+                        "map": "de_nuke",
+                        "mapOver": True,
+                        "scores": {"10": 16, "20": 12},
+                    }
+                },
+                "_scoreboard": {
+                    "mapName": "de_mirage",
+                    "ctTeamId": 10,
+                    "tTeamId": 20,
+                    "ctTeamScore": 0,
+                    "tTeamScore": 0,
+                    "live": False,
+                },
+                "_legacy_score_available": True,
+            },
+            {"team1_id": "10", "team2_id": "20"},
+            [{"map": "Nuke"}, {"map": "Mirage"}],
+        )
+
+        self.assertEqual(summary["maps_score"], "1:0")
+        self.assertEqual(summary["current_score"], "")
+        self.assertEqual(summary["score_source"], "scorebot")
+
     def test_map_over_controls_state_regardless_of_score(self):
         config = {"team1_id": "10", "team2_id": "20"}
         cases = (
@@ -855,12 +886,6 @@ class MatchSnapshotTests(unittest.TestCase):
 
 
 class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
-    @staticmethod
-    def _frame(packet: str) -> bytes:
-        body = packet.encode()
-        digits = bytes(int(digit) for digit in str(len(body)))
-        return b"\x00" + digits + b"\xff" + body
-
     def test_matches_parser_keeps_live_scorebot_team_ids(self):
         page = BeautifulSoup(
             """
@@ -1093,7 +1118,7 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["score_source"], "page")
         self.assertIn("curl_cffi", warning.call_args.args[0])
 
-    async def test_scorebot_polling_protocol_returns_score_and_scoreboard(self):
+    async def test_scorebot_websocket_returns_score_and_scoreboard(self):
         config = {
             "url": "https://scorebot-lb.hltv.org",
             "list_id": "123",
@@ -1112,40 +1137,48 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
             "ctTeamScore": 3,
             "tTeamScore": 4,
         }
-        responses = [
-            self._frame(
-                '0{"sid":"session-1","upgrades":[],"pingInterval":25000,'
-                '"pingTimeout":60000}'
-            ),
-            self._frame("40"),
-            self._frame(
+        messages = [
+            b'0{"sid":"session-1","upgrades":[],"pingInterval":25000,'
+            b'"pingTimeout":60000}',
+            b"40",
+            (
                 "42"
                 + json.dumps(["scoreboard", scoreboard], separators=(",", ":"))
-            ),
-            self._frame("42" + json.dumps(["score", score], separators=(",", ":"))),
+            ).encode(),
+            ("42" + json.dumps(["score", score], separators=(",", ":"))).encode(),
         ]
 
-        class FakeResponse:
-            status_code = 200
+        class FakeFrame:
+            bytesleft = 0
+            flags = 1
 
-            def __init__(self, content=b"ok"):
-                self.content = content
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+                self.closed = False
+
+            def recv_fragment(self):
+                return messages.pop(0), FakeFrame()
+
+            def send(self, payload, flags):
+                self.sent.append((payload, flags))
+
+            def close(self):
+                self.closed = True
 
         class FakeSession:
             instance = None
 
             def __init__(self, **kwargs):
                 self.options = kwargs
-                self.posts = []
+                self.websocket = FakeWebSocket()
+                self.connection = None
                 self.closed = False
                 FakeSession.instance = self
 
-            def get(self, *_args, **_kwargs):
-                return FakeResponse(responses.pop(0))
-
-            def post(self, *_args, **kwargs):
-                self.posts.append(kwargs["data"])
-                return FakeResponse()
+            def ws_connect(self, url, **kwargs):
+                self.connection = (url, kwargs)
+                return self.websocket
 
             def close(self):
                 self.closed = True
@@ -1161,9 +1194,12 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["listId"], 123)
         self.assertEqual(result["_scoreboard"], scoreboard)
         self.assertTrue(result["_legacy_score_available"])
-        self.assertEqual(FakeSession.instance.posts[0], "2:40")
-        self.assertIn("readyForScores", FakeSession.instance.posts[1])
-        self.assertIn("readyForMatch", FakeSession.instance.posts[2])
+        self.assertIn("transport=websocket", FakeSession.instance.connection[0])
+        sent = [payload for payload, _flags in FakeSession.instance.websocket.sent]
+        self.assertEqual(sent[0], "40")
+        self.assertIn("readyForScores", sent[1])
+        self.assertIn("readyForMatch", sent[2])
+        self.assertTrue(FakeSession.instance.websocket.closed)
         self.assertTrue(FakeSession.instance.closed)
 
 
