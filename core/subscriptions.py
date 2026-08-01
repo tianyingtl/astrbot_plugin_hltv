@@ -65,6 +65,14 @@ class LiveSubscriptionStore:
             "user_name": str(user_name),
             "last_map_index": int(snapshot.get("active_map_index") or 0),
             "last_map_name": str(snapshot.get("current_map_name") or ""),
+            "sent_map_ratings": sorted(
+                {
+                    int(item.get("index") or 0)
+                    for item in (snapshot.get("map_ratings") or [])
+                    if str(item.get("index") or "").isdigit()
+                    and int(item.get("index") or 0) > 0
+                }
+            ),
             "created_at": int(time.time()),
         }
         key = subscription_key(item)
@@ -114,23 +122,40 @@ def advance_subscription(
 ) -> tuple[dict, list[dict], bool]:
     """用一次比赛快照推进订阅，返回（新状态、事件、是否完成）。"""
     updated = dict(subscription)
+    sent_map_ratings = {
+        int(index)
+        for index in (updated.get("sent_map_ratings") or [])
+        if str(index).isdigit() and int(index) > 0
+    }
+    events = []
+    for map_rating in snapshot.get("map_ratings") or []:
+        index = int(map_rating.get("index") or 0)
+        if index <= 0 or index in sent_map_ratings or not map_rating.get("ratings"):
+            continue
+        events.append(
+            {"kind": "map_finished", "snapshot": snapshot, "map": map_rating}
+        )
+        sent_map_ratings.add(index)
+    updated["sent_map_ratings"] = sorted(sent_map_ratings)
+
     if str(snapshot.get("status")) == "finished":
         if snapshot.get("ratings"):
-            return updated, [{"kind": "match_finished", "snapshot": snapshot}], True
+            events.append({"kind": "match_finished", "snapshot": snapshot})
+            return updated, events, True
         current = int(time.time()) if now is None else int(now)
         first_seen = int(updated.get("finished_seen_at") or 0)
         if not first_seen:
             updated["finished_seen_at"] = current
-            return updated, [], False
+            return updated, events, False
         if current - first_seen < max(0, int(rating_wait_seconds)):
-            return updated, [], False
-        return updated, [{"kind": "match_finished", "snapshot": snapshot}], True
+            return updated, events, False
+        events.append({"kind": "match_finished", "snapshot": snapshot})
+        return updated, events, True
 
     updated.pop("finished_seen_at", None)
     previous_index = int(updated.get("last_map_index") or 0)
     current_index = int(snapshot.get("active_map_index") or 0)
     current_name = str(snapshot.get("current_map_name") or "")
-    events = []
     if previous_index and current_index > previous_index:
         events.append({"kind": "map_started", "snapshot": snapshot})
     updated["last_map_index"] = max(previous_index, current_index)

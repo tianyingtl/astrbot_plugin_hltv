@@ -159,6 +159,7 @@ VRS_REGIONS = {
 # 与本模块内部使用的键保持同源。
 
 MATCHES_RAW_KEY = "matches_raw"
+HOME_LIVE_KEY = "home_live"
 RANKING_HLTV_KEY = "ranking:hltv:50"
 EVENTS_KEY = "events"
 NEWS_KEY = "news"
@@ -414,6 +415,14 @@ class HltvClient:
                 event = str(ev.get("data-event-headline") or "").strip() or ev.get_text(
                     " ", strip=True
                 )
+            best_of = ""
+            for meta in w.find_all("div", class_="match-meta"):
+                match_format = re.fullmatch(
+                    r"bo\s*(\d+)", meta.get_text(" ", strip=True), re.IGNORECASE
+                )
+                if match_format:
+                    best_of = f"BO{match_format.group(1)}"
+                    break
             names = [t.get_text(strip=True) for t in w.find_all("div", class_="match-teamname")]
             team_ids = []
             for score in w.select("[data-livescore-team]"):
@@ -443,6 +452,7 @@ class HltvClient:
                 "team1_id": team_ids[0] if team_ids else "",
                 "team2_id": team_ids[1] if len(team_ids) > 1 else "",
                 "event": event,
+                "best_of": best_of,
                 "unix": unix,
                 "url": url,
             }
@@ -458,6 +468,98 @@ class HltvClient:
             items.append(entry)
         return items
 
+    @staticmethod
+    def _parse_home_live_matches(page: Any) -> list[dict]:
+        """从主页实时卡片读取当前直播，排除同区展示的已结束场次。"""
+        active: dict[str, dict] = {}
+        for link in page.select("a.hotmatch-box[data-livescore-match]"):
+            box = link.select_one(".teambox")
+            classes = set(box.get("class") or []) if box else set()
+            if (
+                box is None
+                or str(box.get("filteraslive") or "").lower() != "true"
+                or "matchover" in classes
+            ):
+                continue
+            match_id = str(link.get("data-livescore-match") or "")
+            if not match_id.isdigit():
+                continue
+            href = str(link.get("href") or "")
+            names = [
+                item.get_text(" ", strip=True)
+                for item in link.select(".team")
+            ]
+            try:
+                stars = int(box.get("stars") or 0)
+            except (TypeError, ValueError):
+                stars = 0
+            title = str(link.get("title") or "").strip()
+            event = title.rsplit(" - ", 1)[-1].strip() if title else ""
+            active[match_id] = {
+                "id": match_id,
+                "live": True,
+                "rating": stars,
+                "team1": names[0] if names else "",
+                "team2": names[1] if len(names) > 1 else "",
+                "team1_id": str(box.get("team1") or ""),
+                "team2_id": str(box.get("team2") or ""),
+                "event": event,
+                "best_of": "",
+                "unix": None,
+                "url": urljoin(_HOME_URL, href) if href else "",
+            }
+
+        for table in page.select("table.match-table"):
+            table_ids = list(
+                dict.fromkeys(
+                    str(item.get("data-livescore-team") or "")
+                    for item in table.select("[data-livescore-team]")
+                    if str(item.get("data-livescore-team") or "").isdigit()
+                )
+            )
+            table_names = [
+                item.get_text(" ", strip=True) for item in table.select(".a-default")
+            ]
+            match_id = next(
+                (
+                    key
+                    for key, item in active.items()
+                    if len(table_ids) >= 2
+                    and {item.get("team1_id"), item.get("team2_id")}
+                    == set(table_ids[:2])
+                ),
+                "",
+            )
+            if not match_id and len(table_names) >= 2:
+                match_id = next(
+                    (
+                        key
+                        for key, item in active.items()
+                        if {item.get("team1"), item.get("team2")}
+                        == set(table_names[:2])
+                    ),
+                    "",
+                )
+            if match_id not in active:
+                continue
+            rows = table.select("tr")
+            if rows:
+                cells = rows[0].select("td")
+                if cells:
+                    active[match_id]["event"] = cells[0].get_text(" ", strip=True)
+                if len(cells) > 1:
+                    format_match = re.search(
+                        r"\bbo\s*(\d+)\b",
+                        cells[1].get_text(" ", strip=True),
+                        re.IGNORECASE,
+                    )
+                    if format_match:
+                        active[match_id]["best_of"] = f"BO{format_match.group(1)}"
+            if len(table_names) >= 2:
+                active[match_id]["team1"] = table_names[0]
+                active[match_id]["team2"] = table_names[1]
+        return list(active.values())
+
     async def _get_matches_raw(self) -> list[dict]:
         async def fetch() -> list[dict]:
             page = await self._fetch_raw(_MATCHES_URL)
@@ -465,6 +567,14 @@ class HltvClient:
 
         ttl = min(float(self._cache_ttl or _LIVE_TTL), _LIVE_TTL)
         return await self._cached_locked(MATCHES_RAW_KEY, fetch, ttl=ttl)
+
+    async def _get_home_live_raw(self) -> list[dict]:
+        async def fetch() -> list[dict]:
+            page = await self._fetch_raw(_HOME_URL)
+            return self._parse_home_live_matches(page)
+
+        ttl = min(float(self._cache_ttl or _LIVE_TTL), _LIVE_TTL)
+        return await self._cached_locked(HOME_LIVE_KEY, fetch, ttl=ttl)
 
     def _matches_view(self, raw: list[dict], days: int, min_stars: int) -> list[dict]:
         """原始比赛 → 展示视图：星级过滤、时间窗口、丢弃纯占位对阵。
@@ -513,7 +623,11 @@ class HltvClient:
         return await self.get_matches(days=1, min_stars=min_stars)
 
     async def get_live_matches(self, min_stars: int = 0) -> list[dict]:
-        raw = await self._get_matches_raw()
+        try:
+            raw = await self._get_home_live_raw()
+        except HltvError as e:
+            logger.warning(f"[hltv] 主页直播列表不可用，改用 matches 页: {e}")
+            raw = await self._get_matches_raw()
         return [
             {**m, "date": LIVE, "time": LIVE}
             for m in raw
@@ -539,6 +653,8 @@ class HltvClient:
         for holder in page.find_all("div", class_="mapholder"):
             name_el = holder.find(class_="mapname")
             stats_link = holder.select_one("a.results-stats[href*='/mapstatsid/']")
+            stats_href = str(stats_link.get("href") or "") if stats_link else ""
+            stats_match = re.search(r"/mapstatsid/(\d+)", stats_href)
             scores = [
                 e.get_text(strip=True)
                 for e in holder.find_all(class_="results-team-score")
@@ -557,6 +673,7 @@ class HltvClient:
                         "played": started,
                         "finished": finished,
                         "winner": winner,
+                        "stats_id": stats_match.group(1) if stats_match else "",
                     }
                 )
 
@@ -965,8 +1082,7 @@ class HltvClient:
         return summary
 
     @staticmethod
-    def _parse_match_ratings(page: Any) -> tuple[str, list[dict]]:
-        container = page.select_one(".stats-content#all-content")
+    def _parse_rating_container(container: Any) -> tuple[str, list[dict]]:
         if container is None:
             return "", []
         version_el = container.select_one("table.totalstats .ratingDesc")
@@ -983,15 +1099,55 @@ class HltvClient:
                     continue
                 rating = rating_el.get_text(" ", strip=True)
                 if rating:
-                    players.append(
-                        {
-                            "nickname": nick_el.get_text(" ", strip=True),
-                            "rating": rating,
-                        }
-                    )
+                    nickname = nick_el.get_text(" ", strip=True)
+                    player = {"nickname": nickname, "rating": rating}
+                    name_el = row.select_one(".statsPlayerName")
+                    full_name = name_el.get_text(" ", strip=True) if name_el else ""
+                    if full_name and full_name != nickname:
+                        player["name"] = full_name
+                    for key, selector in (
+                        ("kd", "td.kd"),
+                        ("swing", "td.roundSwing, td.swing, td.kddiff"),
+                        ("adr", "td.adr"),
+                        ("kast", "td.kast"),
+                    ):
+                        cell = row.select_one(selector)
+                        value = cell.get_text(" ", strip=True) if cell else ""
+                        if value:
+                            player[key] = value
+                    players.append(player)
             if players:
                 teams.append({"team": team, "players": players})
         return version, teams
+
+    @classmethod
+    def _parse_match_ratings(cls, page: Any) -> tuple[str, list[dict]]:
+        return cls._parse_rating_container(
+            page.find(class_="stats-content", id="all-content")
+        )
+
+    @classmethod
+    def _parse_map_ratings(cls, page: Any, maps: list[dict]) -> list[dict]:
+        results = []
+        for index, item in enumerate(maps, start=1):
+            stats_id = str(item.get("stats_id") or "")
+            if not stats_id:
+                continue
+            container = page.find(class_="stats-content", id=f"{stats_id}-content")
+            version, ratings = cls._parse_rating_container(container)
+            if not ratings:
+                continue
+            s1, s2 = str(item.get("s1") or ""), str(item.get("s2") or "")
+            results.append(
+                {
+                    "index": index,
+                    "map": str(item.get("map") or "?"),
+                    "score": f"{s1}:{s2}" if s1.isdigit() and s2.isdigit() else "",
+                    "rating_version": version,
+                    "ratings": ratings,
+                }
+            )
+        return results
 
     @classmethod
     def _parse_match_snapshot(cls, page: Any) -> dict:
@@ -1017,6 +1173,12 @@ class HltvClient:
         team1_el = page.select_one(".team1-gradient .teamName")
         team2_el = page.select_one(".team2-gradient .teamName")
         event_el = page.select_one(".timeAndEvent .event")
+        format_el = page.select_one(".preformatted-text")
+        format_match = re.search(
+            r"\bBest\s+of\s+(\d+)\b",
+            format_el.get_text(" ", strip=True) if format_el else "",
+            re.IGNORECASE,
+        )
         version, ratings = cls._parse_match_ratings(page) if finished else ("", [])
         return {
             **summary,
@@ -1024,7 +1186,9 @@ class HltvClient:
             "team1": team1_el.get_text(" ", strip=True) if team1_el else "?",
             "team2": team2_el.get_text(" ", strip=True) if team2_el else "?",
             "event": event_el.get_text(" ", strip=True) if event_el else "",
+            "best_of": f"BO{format_match.group(1)}" if format_match else "",
             "maps": maps,
+            "map_ratings": cls._parse_map_ratings(page, maps),
             "rating_version": version,
             "ratings": ratings,
             "score_source": "page" if finished or has_page_score else "unavailable",
@@ -1073,6 +1237,7 @@ class HltvClient:
                     "team1": str(match.get("team1") or "?"),
                     "team2": str(match.get("team2") or "?"),
                     "event": str(match.get("event") or ""),
+                    "best_of": str(match.get("best_of") or ""),
                     "rating_version": "",
                     "ratings": [],
                     **self.summarize_scorebot(score, config, []),
@@ -2225,7 +2390,7 @@ class HltvClient:
     # ---------------------------------------------------------------- 新闻
 
     async def get_news(self) -> list[dict]:
-        """今日新闻（自建主页解析：保留完整文章链接、不丢头条）。
+        """今日新闻（精确读取 Today's news，不混入赛事专题或昨日新闻）。
         条目：{'title','url','desc','posted','featured'}"""
 
         async def fetch() -> list[dict]:
@@ -2236,7 +2401,20 @@ class HltvClient:
 
     @staticmethod
     def _parse_homepage_news(page: Any) -> list[dict]:
-        box = page.find("div", class_="standard-box standard-list")
+        boxes = page.select("div.standard-box.standard-list")
+        box = next(
+            (
+                candidate
+                for candidate in boxes
+                if candidate.find_previous_sibling() is not None
+                and candidate.find_previous_sibling()
+                .get_text(" ", strip=True)
+                .replace("’", "'")
+                .casefold()
+                == "today's news"
+            ),
+            boxes[0] if boxes else None,
+        )
         if box is None:
             return []
         items: list[dict] = []

@@ -22,6 +22,7 @@ sys.modules.setdefault("astrbot.api", astrbot_api)
 from core.client import HltvClient, HltvError
 from core.formatter import (
     format_live,
+    format_map_rating,
     format_map_started,
     format_match_finished,
     format_news,
@@ -36,6 +37,7 @@ from core.renderer import (
     CARD_BASE_BACKGROUND,
     CARD_SIZE,
     PLAYER_CARD_SIZE,
+    RATING_CARD_SIZE,
     TOP20_CARD_SIZE,
     WIDE_BACKGROUND,
     _pick_background,
@@ -44,6 +46,7 @@ from core.renderer import (
     render_matches_card,
     render_news_card,
     render_player_card,
+    render_rating_card,
     render_ranking_card,
     render_results_card,
     render_team_card,
@@ -61,6 +64,7 @@ class LiveFormatTests(unittest.TestCase):
                 {
                     "team1": "Wildcard",
                     "team2": "MongolZ",
+                    "best_of": "BO3",
                     "maps_score": "0:1",
                     "current_map": "当前 Ancient 4:8",
                     "event": "IEM Cologne",
@@ -71,7 +75,7 @@ class LiveFormatTests(unittest.TestCase):
 
         self.assertLess(
             text.index("小局  Ancient 4:8"),
-            text.index("大局  Wildcard 0:1 MongolZ"),
+            text.index("大局  BO3  Wildcard 0:1 MongolZ"),
         )
         self.assertIn("MATCH 01  |  LIVE  ★★★", text)
 
@@ -115,6 +119,43 @@ class NewsTitleTests(unittest.TestCase):
 
         self.assertEqual(news_titles(item), (title, ""))
         self.assertEqual(format_news([item], 10).count(title), 1)
+
+    def test_homepage_parser_uses_todays_news_instead_of_event_feed(self):
+        page = BeautifulSoup(
+            """
+            <div class="news-list-header">BLAST Bounty S2 Finals</div>
+            <div class="standard-box standard-list">
+              <a class="newsline article" href="/news/1/live-updates">
+                <div class="newstext">Featured live update</div>
+              </a>
+            </div>
+            <div class="news-list-header">Today's news</div>
+            <div class="standard-box standard-list">
+              <a class="newsline article" href="/news/2/today-one">
+                <div class="newstext">Today's first story</div>
+                <div class="newsrecent">an hour ago</div>
+              </a>
+              <a class="newsline article" href="/news/3/today-two">
+                <div class="newstext">Today's second story</div>
+                <div class="newsrecent">two hours ago</div>
+              </a>
+            </div>
+            <div class="news-list-header">Yesterday's news</div>
+            <div class="standard-box standard-list">
+              <a class="newsline article" href="/news/4/yesterday">
+                <div class="newstext">Yesterday's story</div>
+              </a>
+            </div>
+            """,
+            "lxml",
+        )
+
+        items = HltvClient._parse_homepage_news(page)
+
+        self.assertEqual(
+            [item["title"] for item in items],
+            ["Today's first story", "Today's second story"],
+        )
 
 
 class Top20Tests(unittest.IsolatedAsyncioTestCase):
@@ -537,6 +578,7 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
 class MatchSnapshotTests(unittest.TestCase):
     HTML = """
     <div class="countdown">Match over</div>
+    <div class="padding preformatted-text">Best of 3 (LAN)</div>
     <div class="team1-gradient"><div class="teamName">100 Thieves</div></div>
     <div class="team2-gradient"><div class="teamName">Spirit</div></div>
     <div class="timeAndEvent"><div class="event">BLAST Bounty</div></div>
@@ -570,6 +612,7 @@ class MatchSnapshotTests(unittest.TestCase):
         snapshot = HltvClient._parse_match_snapshot(BeautifulSoup(self.HTML, "lxml"))
 
         self.assertEqual(snapshot["status"], "finished")
+        self.assertEqual(snapshot["best_of"], "BO3")
         self.assertEqual(snapshot["maps_score"], "1:1")
         self.assertEqual(snapshot["rating_version"], "3.0")
         self.assertEqual(
@@ -580,6 +623,102 @@ class MatchSnapshotTests(unittest.TestCase):
         notice = format_match_finished(snapshot)
         self.assertIn("100 Thieves 1:1 Spirit", notice)
         self.assertIn("donk 1.61", notice)
+
+    def test_rating_parser_keeps_full_hltv_columns(self):
+        container = BeautifulSoup(
+            """
+            <div class="stats-content">
+              <table class="totalstats">
+                <tr class="header-row">
+                  <td class="teamName">FaZe</td>
+                  <td>K-D</td><td>Swing</td><td>ADR</td><td>KAST</td>
+                  <td>Rating <span class="ratingDesc">3.0</span></td>
+                </tr>
+                <tr>
+                  <td>
+                    <span class="player-nick">Twistzz</span>
+                    <span class="statsPlayerName">Russel 'Twistzz' Van Dulken</span>
+                  </td>
+                  <td class="kd">43-45</td>
+                  <td class="roundSwing">+2.07%</td>
+                  <td class="adr">72.6</td>
+                  <td class="kast">76.9%</td>
+                  <td class="rating">1.10</td>
+                </tr>
+              </table>
+            </div>
+            """,
+            "lxml",
+        ).div
+
+        version, teams = HltvClient._parse_rating_container(container)
+
+        self.assertEqual(version, "3.0")
+        self.assertEqual(
+            teams[0]["players"][0],
+            {
+                "nickname": "Twistzz",
+                "name": "Russel 'Twistzz' Van Dulken",
+                "kd": "43-45",
+                "swing": "+2.07%",
+                "adr": "72.6",
+                "kast": "76.9%",
+                "rating": "1.10",
+            },
+        )
+
+    def test_live_snapshot_includes_completed_map_ratings(self):
+        page = BeautifulSoup(
+            """
+            <div class="countdown">LIVE</div>
+            <div class="team1-gradient"><div class="teamName">Team A</div></div>
+            <div class="team2-gradient"><div class="teamName">Team B</div></div>
+            <div class="mapholder">
+              <div class="mapname">Nuke</div>
+              <div class="results played">
+                <div class="results-team-score">13</div>
+                <div class="results-team-score">7</div>
+              </div>
+              <a class="results-stats" href="/stats/matches/mapstatsid/123/nuke">STATS</a>
+            </div>
+            <div class="mapholder">
+              <div class="mapname">Mirage</div>
+              <div class="results played">
+                <div class="results-team-score">2</div>
+                <div class="results-team-score">1</div>
+              </div>
+            </div>
+            <div class="stats-content" id="123-content">
+              <table class="totalstats">
+                <tr class="header-row"><td class="teamName">Team A</td><td class="ratingDesc">3.0</td></tr>
+                <tr><td class="player-nick">alpha</td><td class="rating">1.42</td></tr>
+              </table>
+              <table class="totalstats">
+                <tr class="header-row"><td class="teamName">Team B</td></tr>
+                <tr><td class="player-nick">bravo</td><td class="rating">0.91</td></tr>
+              </table>
+            </div>
+            """,
+            "lxml",
+        )
+
+        snapshot = HltvClient._parse_match_snapshot(page)
+
+        self.assertEqual(snapshot["maps"][0]["stats_id"], "123")
+        self.assertEqual(len(snapshot["map_ratings"]), 1)
+        self.assertEqual(snapshot["map_ratings"][0]["index"], 1)
+        self.assertEqual(snapshot["map_ratings"][0]["map"], "Nuke")
+        self.assertEqual(snapshot["map_ratings"][0]["score"], "13:7")
+        self.assertEqual(
+            snapshot["map_ratings"][0]["ratings"][0]["players"][0],
+            {"nickname": "alpha", "rating": "1.42"},
+        )
+
+        notice = format_map_rating(snapshot, snapshot["map_ratings"][0])
+        self.assertIn("MAP 1", notice)
+        self.assertIn("Nuke", notice)
+        self.assertIn("Team A 13:7 Team B", notice)
+        self.assertIn("alpha 1.42", notice)
 
     def test_live_page_uses_last_scored_map_as_current_fallback(self):
         page = BeautifulSoup(
@@ -892,6 +1031,8 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
             <div class="match-wrapper" data-match-id="2396288"
                  data-stars="1" live="true">
               <a href="/matches/2396288/havu-vs-bcgame">
+                <div class="match-meta match-meta-live">Live</div>
+                <div class="match-meta">bo3</div>
                 <div class="match-event" data-event-headline="Elisa Esports"></div>
                 <div class="match-teamname">HAVU</div>
                 <div class="match-teamname">BC.Game</div>
@@ -909,12 +1050,115 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(matches), 1)
         self.assertTrue(matches[0]["live"])
+        self.assertEqual(matches[0]["best_of"], "BO3")
         self.assertEqual(matches[0]["team1_id"], "7865")
         self.assertEqual(matches[0]["team2_id"], "12878")
 
+    def test_home_live_parser_keeps_scorebot_ids_and_bo(self):
+        page = BeautifulSoup(
+            """
+            <a class="hotmatch-box a-reset" data-livescore-match="2397001"
+               href="/matches/2397001/faze-vs-spirit" title="BLAST Bounty">
+              <div class="teambox match star5-filter" filteraslive="true"
+                   stars="5" team1="6667" team2="4608">
+                <span class="team">FaZe</span>
+                <span class="team">Spirit</span>
+              </div>
+            </a>
+            <a class="col standard-box block a-reset"
+               href="/matches/2397001/faze-vs-spirit">
+              <table class="match-table">
+                <tr>
+                  <td class="match-table-name-col">BLAST Bounty</td>
+                  <td class="match-table-map-col">bo3</td>
+                </tr>
+                <tr>
+                  <td><span class="a-default">FaZe</span></td>
+                  <td><span data-livescore-team="6667"></span></td>
+                </tr>
+                <tr>
+                  <td><span class="a-default">Spirit</span></td>
+                  <td><span data-livescore-team="4608"></span></td>
+                </tr>
+              </table>
+            </a>
+            <a class="hotmatch-box a-reset" data-livescore-match="2396999"
+               href="/matches/2396999/finished">
+              <div class="teambox match matchover" filteraslive="true"
+                   stars="1" team1="1" team2="2">
+                <span class="team">Finished A</span>
+                <span class="team">Finished B</span>
+              </div>
+            </a>
+            """,
+            "lxml",
+        )
+
+        matches = HltvClient._parse_home_live_matches(page)
+
+        self.assertEqual(
+            matches,
+            [
+                {
+                    "id": "2397001",
+                    "live": True,
+                    "rating": 5,
+                    "team1": "FaZe",
+                    "team2": "Spirit",
+                    "team1_id": "6667",
+                    "team2_id": "4608",
+                    "event": "BLAST Bounty",
+                    "best_of": "BO3",
+                    "unix": None,
+                    "url": "https://www.hltv.org/matches/2397001/faze-vs-spirit",
+                }
+            ],
+        )
+
+    async def test_live_matches_uses_homepage_without_touching_matches_path(self):
+        client = HltvClient(cache_ttl=0)
+        fallback = [
+            {
+                "id": "2397001",
+                "live": True,
+                "rating": 5,
+                "team1": "FaZe",
+                "team2": "Spirit",
+            }
+        ]
+        client._get_home_live_raw = AsyncMock(return_value=fallback)
+        client._get_matches_raw = AsyncMock()
+
+        matches = await client.get_live_matches(min_stars=3)
+
+        self.assertEqual(matches[0]["date"], "LIVE")
+        self.assertEqual(matches[0]["time"], "LIVE")
+        client._get_home_live_raw.assert_awaited_once_with()
+        client._get_matches_raw.assert_not_awaited()
+
+    async def test_live_matches_falls_back_when_homepage_is_blocked(self):
+        client = HltvClient(cache_ttl=0)
+        fallback = [
+            {
+                "id": "2397001",
+                "live": True,
+                "rating": 5,
+                "team1": "FaZe",
+                "team2": "Spirit",
+            }
+        ]
+        client._get_home_live_raw = AsyncMock(side_effect=HltvError("HTTP 403"))
+        client._get_matches_raw = AsyncMock(return_value=fallback)
+
+        matches = await client.get_live_matches()
+
+        self.assertEqual(matches[0]["team1"], "FaZe")
+        client._get_home_live_raw.assert_awaited_once_with()
+        client._get_matches_raw.assert_awaited_once_with()
+
     async def test_non_live_match_never_becomes_live_from_stale_scorebot(self):
         client = HltvClient(cache_ttl=0)
-        client._get_matches_raw = AsyncMock(
+        client._get_home_live_raw = AsyncMock(
             return_value=[
                 {
                     "id": "2395931",
@@ -1232,12 +1476,53 @@ class LiveSubscriptionTests(unittest.TestCase):
             self.assertEqual(len(LiveSubscriptionStore(path).all()), 1)
             self.assertTrue(store.contains(store.all()[0]))
 
+    def test_store_marks_existing_map_ratings_as_seen(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LiveSubscriptionStore(Path(temp) / "subscriptions.json")
+            store.add(
+                {"id": "123", "url": "/matches/123/test"},
+                {
+                    "active_map_index": 2,
+                    "current_map_name": "Mirage",
+                    "map_ratings": [{"index": 1, "map": "Nuke"}],
+                },
+                umo="group:1",
+                user_id="42",
+                user_name="Chiaki",
+            )
+
+            self.assertEqual(store.all()[0]["sent_map_ratings"], [1])
+
     def test_map_transition_notifies_only_once(self):
         subscription = {"last_map_index": 1, "last_map_name": "Anubis"}
         snapshot = {"status": "live", "active_map_index": 2, "current_map_name": "Mirage"}
 
         updated, events, finished = advance_subscription(subscription, snapshot)
         self.assertEqual([event["kind"] for event in events], ["map_started"])
+        self.assertFalse(finished)
+        _, repeated, _ = advance_subscription(updated, snapshot)
+        self.assertEqual(repeated, [])
+
+    def test_completed_map_rating_notifies_only_once(self):
+        subscription = {"last_map_index": 1, "sent_map_ratings": []}
+        snapshot = {
+            "status": "live",
+            "active_map_index": 1,
+            "current_map_name": "Nuke",
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "ratings": [{"team": "Team A", "players": []}],
+                }
+            ],
+        }
+
+        updated, events, finished = advance_subscription(subscription, snapshot)
+
+        self.assertEqual([event["kind"] for event in events], ["map_finished"])
+        self.assertEqual(events[0]["map"]["map"], "Nuke")
+        self.assertEqual(updated["sent_map_ratings"], [1])
         self.assertFalse(finished)
         _, repeated, _ = advance_subscription(updated, snapshot)
         self.assertEqual(repeated, [])
@@ -1271,6 +1556,36 @@ class LiveSubscriptionTests(unittest.TestCase):
         }
         _, events, finished = advance_subscription(subscription, rated, now=100)
         self.assertEqual([event["kind"] for event in events], ["match_finished"])
+        self.assertTrue(finished)
+
+    def test_final_map_rating_and_match_rating_are_both_emitted(self):
+        subscription = {"last_map_index": 3, "sent_map_ratings": [1, 2]}
+        snapshot = {
+            "status": "finished",
+            "map_ratings": [
+                {"index": 1, "map": "Nuke", "ratings": []},
+                {"index": 2, "map": "Mirage", "ratings": []},
+                {
+                    "index": 3,
+                    "map": "Ancient",
+                    "ratings": [{"team": "A", "players": []}],
+                },
+            ],
+            "ratings": [
+                {
+                    "team": "A",
+                    "players": [{"nickname": "alpha", "rating": "1.20"}],
+                }
+            ],
+        }
+
+        updated, events, finished = advance_subscription(subscription, snapshot, now=100)
+
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["map_finished", "match_finished"],
+        )
+        self.assertEqual(updated["sent_map_ratings"], [1, 2, 3])
         self.assertTrue(finished)
 
 
@@ -1392,6 +1707,38 @@ class RendererTests(unittest.TestCase):
                     self.assertEqual(image.size, expected)
                     flat = Image.new("RGB", image.size, image.getpixel((0, 0)))
                     self.assertIsNotNone(ImageChops.difference(image, flat).getbbox())
+
+    def test_rating_card_is_a_nonblank_hltv_style_table(self):
+        players = [
+            {
+                "nickname": f"player{index}",
+                "name": f"Player {index} 'player{index}' Example",
+                "kd": f"{40 + index}-{35 + index}",
+                "swing": f"{1.5 - index / 2:+.2f}%",
+                "adr": f"{70 + index / 2:.1f}",
+                "kast": f"{75 - index / 2:.1f}%",
+                "rating": f"{1.25 - index / 10:.2f}",
+            }
+            for index in range(5)
+        ]
+        snapshot = {
+            "team1": "FaZe",
+            "team2": "Spirit",
+            "event": "BLAST Bounty",
+            "maps_score": "1:2",
+            "rating_version": "3.0",
+            "ratings": [
+                {"team": "FaZe", "players": players},
+                {"team": "Spirit", "players": list(reversed(players))},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = render_rating_card(snapshot, output_dir=Path(temp))
+            with Image.open(path) as image:
+                self.assertEqual(image.size, RATING_CARD_SIZE)
+                flat = Image.new("RGB", image.size, image.getpixel((0, 0)))
+                self.assertIsNotNone(ImageChops.difference(image, flat).getbbox())
 
     def test_list_cards_are_nonblank(self):
         matches = [

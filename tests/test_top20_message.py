@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -21,6 +22,10 @@ def _load_main_module():
 
         def message(self, text):
             self.chain.append(("text", text))
+            return self
+
+        def at(self, name, user_id):
+            self.chain.append(("at", (name, user_id)))
             return self
 
         def file_image(self, path):
@@ -134,6 +139,7 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                         "team2": "Team B",
                         "event": "Test Event",
                         "rating": 5,
+                        "best_of": "BO3",
                     }
                 ]
 
@@ -168,8 +174,171 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(results), 1)
         self.assertIn("小局  Nuke   Team A 18:17 Team B", results[0])
-        self.assertIn("大局  Team A 1:1 Team B", results[0])
+        self.assertIn("大局  BO3  Team A 1:1 Team B", results[0])
         self.assertLess(results[0].index("小局"), results[0].index("大局"))
+
+    async def test_live_numbers_subscribe_matches_from_the_shown_list(self):
+        module = _load_main_module()
+
+        class Client:
+            async def get_live_matches(self, min_stars=0):
+                return [
+                    {
+                        "id": index,
+                        "url": f"https://www.hltv.org/matches/{index}/test",
+                        "team1": f"Team {index}A",
+                        "team2": f"Team {index}B",
+                        "event": "Test Event",
+                        "rating": 3,
+                        "live": True,
+                    }
+                    for index in range(1, 5)
+                ]
+
+            async def get_live_snapshot(self, match):
+                return {
+                    "status": "live",
+                    "active_map_index": 1,
+                    "current_map_name": "Nuke",
+                    "current_score": "3:2",
+                    "maps_score": "0:0",
+                    "map_ratings": [],
+                }
+
+            async def get_delayed_matches(self, min_stars=0):
+                return []
+
+        class Event:
+            unified_msg_origin = "group:1"
+
+            def __init__(self, message):
+                self.message_str = message
+
+            @staticmethod
+            def get_sender_id():
+                return "42"
+
+            @staticmethod
+            def get_sender_name():
+                return "Chiaki"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.send_waiting_tip = False
+        plugin.min_stars = 0
+        plugin.event_keywords = []
+        plugin._live_selection_cache = {}
+        plugin._ensure_live_watch_task = lambda: None
+
+        with tempfile.TemporaryDirectory() as temp:
+            plugin.live_subscriptions = module.LiveSubscriptionStore(
+                Path(temp) / "subscriptions.json"
+            )
+            with patch.object(
+                module, "render_live_card", side_effect=RuntimeError("force text fallback")
+            ):
+                listing = [result async for result in plugin.live(Event("/hltv live"))]
+                subscribed = [
+                    result
+                    async for result in plugin.live(Event("/hltv live 1 3"))
+                ]
+                team_subscribed = [
+                    result
+                    async for result in plugin.live(Event("/hltv live Team 2A"))
+                ]
+
+            self.assertIn("/hltv live 1 2 3", listing[0])
+            self.assertIn("已订阅 2 场", subscribed[0])
+            self.assertIn("Team 1A vs Team 1B", subscribed[0])
+            self.assertIn("Team 3A vs Team 3B", subscribed[0])
+            self.assertIn("已订阅 1 场", team_subscribed[0])
+            self.assertEqual(
+                [item["match_id"] for item in plugin.live_subscriptions.all()],
+                ["1", "3", "2"],
+            )
+
+    async def test_rating_notices_send_at_and_image_in_one_chain(self):
+        module = _load_main_module()
+        snapshot = {
+            "status": "finished",
+            "team1": "FaZe",
+            "team2": "Spirit",
+            "event": "Test Event",
+            "maps_score": "1:2",
+            "rating_version": "3.0",
+            "map_ratings": [
+                {
+                    "index": 3,
+                    "map": "Ancient",
+                    "score": "9:13",
+                    "rating_version": "3.0",
+                    "ratings": [{"team": "FaZe", "players": [{"nickname": "a", "rating": "1.10"}]}],
+                }
+            ],
+            "ratings": [{"team": "FaZe", "players": [{"nickname": "a", "rating": "1.05"}]}],
+        }
+
+        class Client:
+            async def get_match_snapshot(self, match_id, url, watch=False):
+                return snapshot
+
+        class Store:
+            def __init__(self):
+                self.item = {
+                    "match_id": "123",
+                    "url": "/matches/123/test",
+                    "umo": "group:1",
+                    "user_id": "42",
+                    "user_name": "Chiaki",
+                    "last_map_index": 3,
+                    "sent_map_ratings": [],
+                }
+                self.removed = False
+
+            def all(self):
+                return [self.item]
+
+            def contains(self, item):
+                return not self.removed
+
+            def update(self, item):
+                self.item = item
+
+            def remove(self, item):
+                self.removed = True
+
+        class Context:
+            def __init__(self):
+                self.sent = []
+
+            async def send_message(self, umo, chain):
+                self.sent.append((umo, chain.chain))
+                return True
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.context = Context()
+        plugin.live_subscriptions = Store()
+
+        with patch.object(
+            module,
+            "render_rating_card",
+            side_effect=[Path("map-rating.png"), Path("match-rating.png")],
+        ):
+            await plugin._poll_live_subscriptions()
+
+        self.assertEqual(len(plugin.context.sent), 2)
+        self.assertEqual(
+            [[kind for kind, _value in chain] for _umo, chain in plugin.context.sent],
+            [["at", "text", "image"], ["at", "text", "image"]],
+        )
+        self.assertEqual(plugin.context.sent[0][1][-1], ("image", "map-rating.png"))
+        self.assertEqual(plugin.context.sent[1][1][-1], ("image", "match-rating.png"))
+        self.assertTrue(plugin.live_subscriptions.removed)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ from astrbot.api.star import Context, Star
 from .core import formatter
 from .core.client import (
     EVENTS_KEY,
+    HOME_LIVE_KEY,
     MATCHES_RAW_KEY,
     NEWS_KEY,
     RANKING_HLTV_KEY,
@@ -38,6 +39,7 @@ from .core.renderer import (
     render_matches_card,
     render_news_card,
     render_player_card,
+    render_rating_card,
     render_ranking_card,
     render_results_card,
     render_team_card,
@@ -99,6 +101,7 @@ class HltvPlugin(Star):
         )
         self._live_watch_task: asyncio.Task | None = None
         self.live_subscriptions = LiveSubscriptionStore()
+        self._live_selection_cache: dict[tuple[str, str], tuple[int, list[dict]]] = {}
 
         self.client = HltvClient(
             proxy_list=[p for p in (config.get("proxy_list") or []) if p],
@@ -261,6 +264,69 @@ class HltvPlugin(Star):
             scored.append((match, snapshot))
         return scored, failures
 
+    @staticmethod
+    def _parse_live_indexes(value: str) -> list[int] | None:
+        tokens = str(value).split()
+        if not tokens or not all(token.isdigit() for token in tokens):
+            return None
+        return list(dict.fromkeys(int(token) for token in tokens))
+
+    def _remember_live_selection(
+        self, event: AstrMessageEvent, matches: list[dict]
+    ) -> None:
+        user_id = self._sender_id(event)
+        umo = str(getattr(event, "unified_msg_origin", ""))
+        if user_id and umo:
+            self._live_selection_cache[(umo, user_id)] = (
+                int(time()),
+                [dict(match) for match in matches],
+            )
+
+    def _get_live_selection(self, event: AstrMessageEvent) -> list[dict]:
+        user_id = self._sender_id(event)
+        umo = str(getattr(event, "unified_msg_origin", ""))
+        cached = self._live_selection_cache.get((umo, user_id))
+        if cached is None:
+            return []
+        created_at, matches = cached
+        if int(time()) - created_at > 5 * 60:
+            self._live_selection_cache.pop((umo, user_id), None)
+            return []
+        return [dict(match) for match in matches]
+
+    async def _subscribe_live_matches(
+        self,
+        event: AstrMessageEvent,
+        matches: list[dict],
+        limit: int,
+    ) -> tuple[int, int, int]:
+        scored, failures = await self._fetch_live_scores(matches, limit)
+        watched = already_watching = 0
+        sender_id = self._sender_id(event)
+        sender_name = self._sender_name(event)
+        umo = str(getattr(event, "unified_msg_origin", ""))
+        for match, snapshot in scored:
+            try:
+                if not sender_id:
+                    continue
+                added = self.live_subscriptions.add(
+                    match,
+                    snapshot,
+                    umo=umo,
+                    user_id=sender_id,
+                    user_name=sender_name,
+                )
+                if added:
+                    watched += 1
+                else:
+                    already_watching += 1
+            except OSError as e:
+                failures += 1
+                logger.warning(f"[hltv] 保存直播订阅失败: {e!r}")
+        if watched:
+            self._ensure_live_watch_task()
+        return watched, already_watching, failures
+
     # ------------------------------------------------------------------ 指令组
 
     @filter.command_group("hltv")
@@ -346,7 +412,48 @@ class HltvPlugin(Star):
             )
             yield event.plain_result(message)
             return
-        if tip := self._waiting_tip(event, MATCHES_RAW_KEY):
+        indexes = self._parse_live_indexes(name)
+        if indexes is not None:
+            if not self._sender_id(event):
+                yield event.plain_result("当前平台未提供用户 ID，无法建立 @ 提醒。")
+                return
+            shown = self._get_live_selection(event)
+            if not shown:
+                yield event.plain_result(
+                    "订阅编号已过期或尚未生成，请先发送 /hltv live 获取当前列表。"
+                )
+                return
+            if any(index <= 0 or index > len(shown) for index in indexes):
+                yield event.plain_result(
+                    f"当前卡片只有 1-{len(shown)} 号比赛，请按卡片序号重新选择。"
+                )
+                return
+            selected = [shown[index - 1] for index in indexes]
+            watched, already_watching, failures = (
+                await self._subscribe_live_matches(event, selected, len(selected))
+            )
+            lines = []
+            if watched:
+                lines.append(f"已订阅 {watched} 场：")
+            elif already_watching:
+                lines.append(f"所选 {already_watching} 场均已在监听：")
+            else:
+                lines.append("未能建立直播订阅。")
+            lines.extend(
+                f"{index}. {match.get('team1') or '?'} vs {match.get('team2') or '?'}"
+                for index, match in zip(indexes, selected)
+            )
+            if failures:
+                lines.append(f"另有 {failures} 场比分读取或订阅保存失败，请稍后重试。")
+            if already_watching and watched:
+                lines.append(f"另有 {already_watching} 场已在监听，无需重复订阅。")
+            if watched or already_watching:
+                lines.append(
+                    "每张地图结束后会推送该图 Rating；新地图开始和整场完赛时也会 @ 你。"
+                )
+            yield event.plain_result("\n".join(lines))
+            return
+        if tip := self._waiting_tip(event, HOME_LIVE_KEY):
             yield tip
         if name:
             # 指定战队：不做星级/关键词过滤——用户点名要看的队就该给结果
@@ -369,40 +476,21 @@ class HltvPlugin(Star):
             except HltvError as e:
                 yield event.plain_result(str(e))
                 return
-            watched = 0
-            already_watching = 0
-            scored, subscription_failures = await self._fetch_live_scores(mine, 2)
-            sender_id = self._sender_id(event)
-            sender_name = self._sender_name(event)
-            umo = str(event.unified_msg_origin)
-            for m, snapshot in scored:
-                try:
-                    if sender_id:
-                        added = self.live_subscriptions.add(
-                            m,
-                            snapshot,
-                            umo=umo,
-                            user_id=sender_id,
-                            user_name=sender_name,
-                        )
-                        if added:
-                            watched += 1
-                        else:
-                            already_watching += 1
-                except OSError as e:
-                    subscription_failures += 1
-                    logger.warning(f"[hltv] 保存直播订阅失败: {e!r}")
+            watched, already_watching, subscription_failures = (
+                await self._subscribe_live_matches(event, mine, 2)
+            )
             if mine:
                 text = formatter.format_live(mine)
                 footer = ""
                 if watched:
-                    self._ensure_live_watch_task()
-                    footer = f"已订阅 {watched} 场：新地图开始和完赛 Rating 会 @ 你。"
+                    footer = (
+                        f"已订阅 {watched} 场：逐图 Rating、新地图开始和完赛 Rating 会 @ 你。"
+                    )
                     text += f"\n\n{footer}"
                 elif already_watching:
-                    footer = "这场比赛已在监听；新地图开始和完赛时会 @ 你。"
+                    footer = "这场比赛已在监听；逐图 Rating、新地图开始和完赛时会 @ 你。"
                     text += f"\n\n{footer}"
-                if not sender_id:
+                if not self._sender_id(event):
                     footer = "当前平台未提供用户 ID，无法建立 @ 提醒。"
                     text += f"\n\n{footer}"
                 elif subscription_failures:
@@ -441,17 +529,30 @@ class HltvPlugin(Star):
         except HltvError as e:
             yield event.plain_result(str(e))
             return
-        await self._fetch_live_scores(data, 4)
-        fallback = formatter.format_live(data, note, delayed)
+        shown = data[:4]
+        await self._fetch_live_scores(shown, 4)
+        fallback = formatter.format_live(shown, note, delayed)
         if data:
-            delayed_note = f"另有 {len(delayed)} 场延迟或刚开打" if delayed else ""
+            self._remember_live_selection(event, shown)
+            footer_parts = []
+            if len(data) > len(shown):
+                footer_parts.append(f"另有 {len(data) - len(shown)} 场未显示")
+            if delayed:
+                footer_parts.append(f"另有 {len(delayed)} 场延迟或刚开打")
+            if self._sender_id(event):
+                footer_parts.append(
+                    "需要订阅？发送 /hltv live 1 2 3（按卡片序号，可多选）"
+                )
+            footer = "  |  ".join(footer_parts)
+            if footer:
+                fallback += f"\n\n{footer}"
             yield await self._image_or_text(
                 event,
                 render_live_card,
                 fallback,
-                data,
+                shown,
                 note=note,
-                footer=delayed_note,
+                footer=footer,
                 log_name="直播卡片",
             )
         else:
@@ -976,16 +1077,38 @@ class HltvPlugin(Star):
                 sent = True
                 for notice in events:
                     kind = notice.get("kind")
-                    text = (
-                        formatter.format_match_finished(snapshot)
-                        if kind == "match_finished"
-                        else formatter.format_map_started(snapshot)
-                    )
+                    if kind == "match_finished":
+                        text = formatter.format_match_finished(snapshot)
+                    elif kind == "map_finished":
+                        text = formatter.format_map_rating(
+                            snapshot, notice.get("map") or {}
+                        )
+                    else:
+                        text = formatter.format_map_started(snapshot)
                     try:
                         chain = MessageChain().at(
                             str(item.get("user_name") or item.get("user_id") or ""),
                             str(item.get("user_id") or ""),
-                        ).message("\n" + text)
+                        )
+                        if kind in {"map_finished", "match_finished"}:
+                            try:
+                                card = await asyncio.to_thread(
+                                    render_rating_card,
+                                    snapshot,
+                                    map_rating=(
+                                        notice.get("map")
+                                        if kind == "map_finished"
+                                        else None
+                                    ),
+                                )
+                                chain.message("\n").file_image(str(card))
+                            except Exception as e:
+                                logger.warning(
+                                    f"[hltv] Rating 图片渲染失败，回退文本: {e!r}"
+                                )
+                                chain.message("\n" + text)
+                        else:
+                            chain.message("\n" + text)
                         delivered = await self.context.send_message(
                             str(item.get("umo") or ""), chain
                         )

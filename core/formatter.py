@@ -137,6 +137,7 @@ def format_live(
             stars = "★" * int(m.get("rating") or 0)
             team1 = str(m.get("team1") or "?")
             team2 = str(m.get("team2") or "?")
+            best_of = str(m.get("best_of") or "").upper()
             series = str(m.get("maps_score") or "").strip()
             event = str(m.get("event", "")).strip()
             map_name = str(m.get("current_map_name") or "").strip()
@@ -156,9 +157,12 @@ def format_live(
                     f"MATCH {index:02d}  |  LIVE  {stars}".rstrip(),
                     f"小局  {small}",
                     (
-                        f"大局  {team1} {series} {team2}"
+                        f"大局  {best_of + '  ' if best_of else ''}{team1} {series} {team2}"
                         if series
-                        else f"大局  {team1} vs {team2}  ·  比分暂未同步"
+                        else (
+                            f"大局  {best_of + '  ' if best_of else ''}"
+                            f"{team1} vs {team2}  ·  比分暂未同步"
+                        )
                     ),
                     f"赛事  {event or '赛事信息暂缺'}",
                 ]
@@ -179,6 +183,7 @@ def format_map_started(snapshot: dict) -> str:
     index = int(snapshot.get("active_map_index") or 0)
     total = int(snapshot.get("map_total") or 0)
     series = str(snapshot.get("maps_score") or "0:0")
+    best_of = str(snapshot.get("best_of") or "").upper()
     position = f"MAP {index}/{total}" if total else f"MAP {index}"
     current = str(snapshot.get("current_score") or "")
     small = f"{team1} {current} {team2}" if current else "比分暂未同步"
@@ -188,10 +193,51 @@ def format_map_started(snapshot: dict) -> str:
             f"🗺️ {position}  |  {name} 已开始",
             "━━━━━━━━━━━━━━━━━━━━",
             f"小局  {small}",
-            f"大局  {team1} {series} {team2}",
+            f"大局  {best_of + '  ' if best_of else ''}{team1} {series} {team2}",
             f"赛事  {event}",
         ]
     )
+
+
+def _append_rating_rows(lines: list[str], version: str, ratings: list[dict]) -> None:
+    if not ratings:
+        lines.append("Rating 数据暂未同步。")
+        return
+    lines.extend(["━━━━━━━━━━━━━━━━━━━━", f"RATING {version}".rstrip()])
+    for team in ratings:
+        players = [
+            f"{item.get('nickname', '?')} {item.get('rating', '?')}"
+            for item in team.get("players", [])
+        ]
+        lines.append(str(team.get("team") or "?"))
+        if players:
+            lines.extend(
+                "  " + "    ".join(players[index : index + 2])
+                for index in range(0, len(players), 2)
+            )
+        else:
+            lines.append("  暂未同步")
+
+
+def format_map_rating(snapshot: dict, map_rating: dict) -> str:
+    team1 = str(snapshot.get("team1") or "?")
+    team2 = str(snapshot.get("team2") or "?")
+    index = int(map_rating.get("index") or 0)
+    name = str(map_rating.get("map") or "未知地图")
+    score = str(map_rating.get("score") or "")
+    event = str(snapshot.get("event") or "赛事信息暂缺")
+    lines = [
+        f"📊 MAP {index} RATING  |  {name}",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"小局  {team1} {score} {team2}" if score else f"小局  {team1} vs {team2}",
+        f"赛事  {event}",
+    ]
+    _append_rating_rows(
+        lines,
+        str(map_rating.get("rating_version") or ""),
+        list(map_rating.get("ratings") or []),
+    )
+    return "\n".join(lines)
 
 
 def format_match_finished(snapshot: dict) -> str:
@@ -206,24 +252,7 @@ def format_match_finished(snapshot: dict) -> str:
         f"赛果  {team1} {series} {team2}",
         f"赛事  {event}",
     ]
-    ratings = list(snapshot.get("ratings") or [])
-    if ratings:
-        lines.extend(["━━━━━━━━━━━━━━━━━━━━", f"RATING {version}".rstrip()])
-        for team in ratings:
-            players = [
-                f"{item.get('nickname', '?')} {item.get('rating', '?')}"
-                for item in team.get("players", [])
-            ]
-            lines.append(str(team.get("team") or "?"))
-            if players:
-                lines.extend(
-                    "  " + "    ".join(players[index : index + 2])
-                    for index in range(0, len(players), 2)
-                )
-            else:
-                lines.append("  暂未同步")
-    else:
-        lines.append("Rating 数据暂未同步。")
+    _append_rating_rows(lines, version, list(snapshot.get("ratings") or []))
     return "\n".join(lines)
 
 
@@ -447,7 +476,9 @@ def format_news_detail(
 HELP_TEXT = """🎮 HLTV 查询插件
 /hltv today — 今日赛程（大赛）
 /hltv matches [天数] — 近期大赛
-/hltv live [队名] — 直播小局/大局比分（带队名会自动订阅）
+/hltv live — 直播小局/大局比分，并显示可订阅序号
+/hltv live 1 2 3 — 按卡片序号批量订阅比赛
+/hltv live <队名> — 查看指定战队并自动订阅
 /hltv live 取消 — 取消你的直播提醒
 /hltv results [天数] — 近期赛果
 /hltv ranking — Valve VRS 排名（默认全球）

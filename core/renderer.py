@@ -30,6 +30,7 @@ BUNDLED_FONT_BOLD = ROOT / "assets" / "fonts" / "HLTVCardSans-Bold.otf"
 CARD_SIZE = (1600, 1000)
 PLAYER_CARD_SIZE = (1600, 1400)
 TOP20_CARD_SIZE = (1600, 1600)
+RATING_CARD_SIZE = (1600, 1000)
 
 INK = (247, 244, 245, 255)
 MUTED = (196, 187, 191, 255)
@@ -37,6 +38,16 @@ ACCENT = (238, 157, 180, 255)
 LINE = (255, 255, 255, 55)
 GOOD = (132, 210, 170, 255)
 BAD = (239, 137, 151, 255)
+
+RATING_BG = (229, 231, 234, 255)
+RATING_PANEL = (250, 250, 251, 255)
+RATING_ALT = (241, 242, 244, 255)
+RATING_LINE = (194, 197, 201, 255)
+RATING_INK = (57, 57, 61, 255)
+RATING_MUTED = (105, 107, 112, 255)
+RATING_BLUE = (42, 108, 163, 255)
+RATING_GOOD = (0, 158, 14, 255)
+RATING_BAD = (226, 0, 15, 255)
 
 
 class RenderError(Exception):
@@ -274,6 +285,39 @@ def _safe_name(value: Any) -> str:
     cleaned = re.sub(r"[^0-9A-Za-z_.-]+", "_", raw).strip("_")[:60]
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
     return f"{cleaned}_{digest}" if cleaned else digest
+
+
+def _draw_centered(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    text: Any,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int, int],
+) -> None:
+    value = str(text or "-")
+    bounds = draw.textbbox((0, 0), value, font=font)
+    width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+    x = box[0] + (box[2] - box[0] - width) // 2 - bounds[0]
+    y = box[1] + (box[3] - box[1] - height) // 2 - bounds[1]
+    draw.text((x, y), value, font=font, fill=fill)
+
+
+def _rating_metric_color(value: Any, *, swing: bool = False):
+    try:
+        number = float(str(value).replace("%", "").replace("+", "").strip())
+    except ValueError:
+        return RATING_INK
+    if swing:
+        if number >= 1:
+            return RATING_GOOD
+        if number <= -1:
+            return RATING_BAD
+    else:
+        if number >= 1.05:
+            return RATING_GOOD
+        if number < 0.95:
+            return RATING_BAD
+    return RATING_INK
 
 
 def render_team_card(
@@ -622,7 +666,9 @@ def render_live_card(
             fill=INK,
         )
         series = str(match.get("maps_score") or "").strip()
-        large = f"{team1}  {series}  {team2}" if series else f"{team1}  vs  {team2}"
+        best_of = str(match.get("best_of") or "").upper()
+        large_score = f"{team1}  {series}  {team2}" if series else f"{team1}  vs  {team2}"
+        large = f"{best_of}  {large_score}" if best_of else large_score
         draw.text((x + 28, y + 132), "大局", font=_font(20, True), fill=MUTED)
         large_font = _fit_font(draw, large, 29, 558, bold=True, minimum=20)
         draw.text((x + 94, y + 126), _ellipsize(draw, large, large_font, 558), font=large_font, fill=INK)
@@ -633,6 +679,112 @@ def render_live_card(
         draw.line((72, 930, 1528, 930), fill=LINE, width=2)
         draw.text((72, 950), _ellipsize(draw, footer, _font(22, True), 1456), font=_font(22, True), fill=ACCENT)
     return _save(canvas, output_dir, "live_center.png")
+
+
+def render_rating_card(
+    snapshot: dict,
+    *,
+    map_rating: dict | None = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    detail = map_rating or snapshot
+    teams = list(detail.get("ratings") or [])[:2]
+    if not teams:
+        raise RenderError("No Rating data available for table rendering.")
+
+    canvas = Image.new("RGBA", RATING_CARD_SIZE, RATING_BG)
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    team1 = str(snapshot.get("team1") or teams[0].get("team") or "?")
+    team2 = str(
+        snapshot.get("team2")
+        or (teams[1].get("team") if len(teams) > 1 else "?")
+    )
+    if map_rating is not None:
+        index = int(map_rating.get("index") or 0)
+        map_name = str(map_rating.get("map") or "未知地图")
+        title = f"MAP {index} RATING  /  {map_name}"
+        score = str(map_rating.get("score") or "")
+        filename_scope = f"map_{index}_{map_name}"
+    else:
+        title = "MATCH RATING"
+        score = str(snapshot.get("maps_score") or "")
+        filename_scope = "match"
+    score_line = f"{team1}  {score}  {team2}" if score else f"{team1}  vs  {team2}"
+    draw.text((30, 20), title, font=_font(34, True), fill=RATING_INK)
+    draw.text((30, 68), score_line, font=_font(27, True), fill=RATING_BLUE)
+    event = _ellipsize(draw, snapshot.get("event") or "", _font(23), 640)
+    if event:
+        bounds = draw.textbbox((0, 0), event, font=_font(23))
+        draw.text((1570 - bounds[2], 72), event, font=_font(23), fill=RATING_MUTED)
+    draw.line((28, 116, 1572, 116), fill=RATING_LINE, width=2)
+
+    edges = (28, 850, 1015, 1180, 1305, 1440, 1572)
+    headers = ("K-D", "Swing", "ADR", "KAST", "Rating")
+    header_height, row_height, row_slots = 58, 64, 5
+    y = 132
+    version = str(detail.get("rating_version") or snapshot.get("rating_version") or "")
+    for team_index in range(2):
+        team = teams[team_index] if team_index < len(teams) else {}
+        team_name = str(team.get("team") or (team1 if team_index == 0 else team2))
+        players = list(team.get("players") or [])[:row_slots]
+        table_bottom = y + header_height + row_height * row_slots
+        draw.rectangle((edges[0], y, edges[-1], table_bottom), fill=RATING_PANEL)
+        draw.rectangle((edges[0], y, edges[-1], y + header_height), fill=(246, 247, 249, 255))
+        draw.rectangle((44, y + 15, 50, y + 43), fill=RATING_BLUE)
+        team_font = _fit_font(draw, team_name, 32, 750, bold=True, minimum=24)
+        draw.text((66, y + 11), _ellipsize(draw, team_name, team_font, 750), font=team_font, fill=RATING_BLUE)
+        for column, label in enumerate(headers, start=1):
+            box = (edges[column], y, edges[column + 1], y + header_height)
+            if label == "Rating" and version:
+                _draw_centered(draw, (box[0], y + 2, box[2], y + 36), label, _font(23, True), RATING_INK)
+                _draw_centered(draw, (box[0], y + 31, box[2], y + 55), version, _font(16), RATING_MUTED)
+            else:
+                _draw_centered(draw, box, label, _font(24, True), RATING_INK)
+        for boundary in edges[1:-1]:
+            draw.line((boundary, y, boundary, table_bottom), fill=RATING_LINE, width=1)
+        for row_index in range(row_slots):
+            top = y + header_height + row_index * row_height
+            bottom = top + row_height
+            if row_index % 2:
+                draw.rectangle((edges[0], top, edges[-1], bottom), fill=RATING_ALT)
+            draw.line((edges[0], top, edges[-1], top), fill=RATING_LINE, width=1)
+            if row_index >= len(players):
+                continue
+            player = players[row_index]
+            name = str(player.get("name") or player.get("nickname") or "?")
+            name_font = _fit_font(draw, name, 27, 760, minimum=20)
+            draw.text((50, top + 16), _ellipsize(draw, name, name_font, 770), font=name_font, fill=RATING_BLUE)
+            values = (
+                player.get("kd"),
+                player.get("swing"),
+                player.get("adr"),
+                player.get("kast"),
+                player.get("rating"),
+            )
+            for column, value in enumerate(values, start=1):
+                fill = RATING_INK
+                font = _font(25)
+                if column == 2:
+                    fill = _rating_metric_color(value, swing=True)
+                elif column == 5:
+                    fill = _rating_metric_color(value)
+                    font = _font(26, True)
+                _draw_centered(
+                    draw,
+                    (edges[column], top, edges[column + 1], bottom),
+                    value,
+                    font,
+                    fill,
+                )
+        draw.rectangle((edges[0], y, edges[-1], table_bottom), outline=RATING_LINE, width=1)
+        y = table_bottom + 18
+
+    identity = snapshot.get("id") or f"{team1}_{team2}"
+    return _save(
+        canvas,
+        output_dir,
+        f"rating_{_safe_name(identity)}_{_safe_name(filename_scope)}.png",
+    )
 
 
 def render_results_card(
