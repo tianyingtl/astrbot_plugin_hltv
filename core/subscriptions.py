@@ -155,10 +155,22 @@ def advance_subscription(
     updated.pop("finished_seen_at", None)
     previous_index = int(updated.get("last_map_index") or 0)
     current_index = int(snapshot.get("active_map_index") or 0)
+    previous_name = str(updated.get("last_map_name") or "")
     current_name = str(snapshot.get("current_map_name") or "")
-    if previous_index and current_index > previous_index:
+    map_changed = (previous_index and current_index > previous_index) or (
+        previous_name
+        and current_name
+        and previous_name.casefold() != current_name.casefold()
+    )
+    if map_changed and snapshot.get("round_live") is False:
+        updated["awaiting_map_start"] = True
+        return updated, events, False
+    if map_changed:
         events.append({"kind": "map_started", "snapshot": snapshot})
+        updated.pop("awaiting_map_start", None)
     updated["last_map_index"] = max(previous_index, current_index)
     if current_name:
         updated["last_map_name"] = current_name
+    elif snapshot.get("maps") and snapshot["maps"][-1].get("finished"):
+        updated["awaiting_map_start"] = True
     return updated, events, False

@@ -1,10 +1,11 @@
+import asyncio
 import importlib.util
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,6 +227,10 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
             def plain_result(text):
                 return text
 
+            @staticmethod
+            def image_result(path):
+                return ("image", path)
+
         plugin = module.HltvPlugin.__new__(module.HltvPlugin)
         plugin.client = Client()
         plugin.send_waiting_tip = False
@@ -238,20 +243,23 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
             plugin.live_subscriptions = module.LiveSubscriptionStore(
                 Path(temp) / "subscriptions.json"
             )
-            with patch.object(
-                module, "render_live_card", side_effect=RuntimeError("force text fallback")
-            ):
+            with patch.object(module, "render_live_card", return_value=Path("live.png")):
                 listing = [result async for result in plugin.live(Event("/hltv live"))]
                 subscribed = [
                     result
                     async for result in plugin.live(Event("/hltv live 1 3"))
                 ]
+            with patch.object(
+                module, "render_live_card", side_effect=RuntimeError("force text fallback")
+            ):
                 team_subscribed = [
                     result
                     async for result in plugin.live(Event("/hltv live Team 2A"))
                 ]
 
-            self.assertIn("/hltv live 1 2 3", listing[0])
+            self.assertEqual(listing[0], ("image", "live.png"))
+            self.assertEqual(len(listing), 2)
+            self.assertIn("/hltv live 1 2 3", listing[1])
             self.assertIn("已订阅 2 场", subscribed[0])
             self.assertIn("Team 1A vs Team 1B", subscribed[0])
             self.assertIn("Team 3A vs Team 3B", subscribed[0])
@@ -260,6 +268,19 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                 [item["match_id"] for item in plugin.live_subscriptions.all()],
                 ["1", "3", "2"],
             )
+
+    async def test_watch_loop_polls_faster_while_waiting_for_map_start(self):
+        module = _load_main_module()
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.live_poll_interval = 45
+        plugin._poll_live_subscriptions = AsyncMock(return_value=True)
+
+        sleep = AsyncMock(side_effect=asyncio.CancelledError)
+        with patch.object(module.asyncio, "sleep", sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await plugin._live_watch_loop()
+
+        sleep.assert_awaited_once_with(10)
 
     async def test_rating_notices_send_at_and_image_in_one_chain(self):
         module = _load_main_module()

@@ -947,24 +947,41 @@ class HltvClient:
 
         ct_id = str(scoreboard.get("ctTeamId") or "")
         t_id = str(scoreboard.get("tTeamId") or "")
-        ct_score = integer("ctTeamScore", "counterTerroristScore")
-        t_score = integer("tTeamScore", "terroristScore")
         team1_id, team2_id = config["team1_id"], config["team2_id"]
-        if ct_score is None or t_score is None:
-            return {}
         if (team1_id, team2_id) == (ct_id, t_id):
-            s1, s2 = ct_score, t_score
+            reversed_sides = False
         elif (team1_id, team2_id) == (t_id, ct_id):
-            s1, s2 = t_score, ct_score
+            reversed_sides = True
         else:
             return {}
 
         name = cls._scorebot_map_name(scoreboard.get("mapName"))
-        return {
-            "current_map": f"{name} {s1}:{s2}",
+        result = {
+            "current_map": "",
             "current_map_name": name,
-            "current_score": f"{s1}:{s2}",
+            "current_score": "",
         }
+        has_round_state = any(
+            key in scoreboard
+            for key in ("currentRoundState", "frozen", "roundTimeRemainingMS")
+        )
+        if has_round_state:
+            remaining = integer("roundTimeRemainingMS", "roundTimeRemaining")
+            result["round_live"] = (
+                str(scoreboard.get("currentRoundState") or "").lower() == "started"
+                and scoreboard.get("frozen") is not True
+                and remaining is not None
+                and remaining > 0
+            )
+
+        ct_score = integer("ctTeamScore", "counterTerroristScore")
+        t_score = integer("tTeamScore", "terroristScore")
+        if ct_score is None or t_score is None:
+            return result if has_round_state else {}
+        s1, s2 = (t_score, ct_score) if reversed_sides else (ct_score, t_score)
+        result["current_score"] = f"{s1}:{s2}"
+        result["current_map"] = f"{name} {s1}:{s2}"
+        return result
 
     @classmethod
     def summarize_scorebot(
@@ -1217,7 +1234,7 @@ class HltvClient:
             )
             return snapshot
 
-        ttl = min(float(self._cache_ttl or _LIVE_TTL), 20 if watch else _LIVE_TTL)
+        ttl = min(float(self._cache_ttl or _LIVE_TTL), 10 if watch else _LIVE_TTL)
         channel = "watch" if watch else "view"
         return await self._cached_locked(
             f"match_snapshot:{channel}:{match_id}", fetch, ttl=ttl

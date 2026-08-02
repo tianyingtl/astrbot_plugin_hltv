@@ -944,6 +944,91 @@ class MatchSnapshotTests(unittest.TestCase):
         self.assertEqual(summary["current_score"], "")
         self.assertEqual(summary["score_source"], "scorebot")
 
+    def test_running_first_round_starts_map_before_score_is_available(self):
+        summary = HltvClient.summarize_scorebot(
+            {
+                "wins": {"10": 1, "20": 0},
+                "mapScores": {
+                    "1": {
+                        "mapOrdinal": 1,
+                        "map": "de_nuke",
+                        "mapOver": True,
+                        "scores": {"10": 13, "20": 8},
+                    }
+                },
+                "_scoreboard": {
+                    "mapName": "de_mirage",
+                    "ctTeamId": 10,
+                    "tTeamId": 20,
+                    "live": True,
+                    "currentRound": 1,
+                    "currentRoundState": "started",
+                    "frozen": False,
+                    "roundTimeRemainingMS": 110000,
+                },
+            },
+            {"team1_id": "10", "team2_id": "20"},
+            [{"map": "Nuke"}, {"map": "Mirage"}],
+        )
+
+        self.assertEqual(summary["current_map_name"], "Mirage")
+        self.assertEqual(summary["current_score"], "")
+        self.assertEqual(summary["active_map_index"], 2)
+        self.assertTrue(summary["round_live"])
+        updated, events, _ = advance_subscription(
+            {"last_map_index": 1, "last_map_name": "Nuke"}, summary
+        )
+        self.assertEqual([event["kind"] for event in events], ["map_started"])
+        self.assertEqual(updated["last_map_index"], 2)
+
+    def test_new_map_freezetime_waits_for_running_clock(self):
+        score = {
+            "wins": {"10": 1, "20": 0},
+            "mapScores": {
+                "1": {
+                    "mapOrdinal": 1,
+                    "map": "de_nuke",
+                    "mapOver": True,
+                    "scores": {"10": 13, "20": 8},
+                }
+            },
+            "_scoreboard": {
+                "mapName": "de_mirage",
+                "ctTeamId": 10,
+                "tTeamId": 20,
+                "ctTeamScore": 0,
+                "tTeamScore": 0,
+                "live": True,
+                "currentRound": 1,
+                "currentRoundState": "freezetime",
+                "frozen": True,
+                "roundTimeRemainingMS": 0,
+            },
+        }
+        config = {"team1_id": "10", "team2_id": "20"}
+        planned = [{"map": "Nuke"}, {"map": "Mirage"}]
+        waiting = HltvClient.summarize_scorebot(score, config, planned)
+        updated, events, _ = advance_subscription(
+            {"last_map_index": 1, "last_map_name": "Nuke"}, waiting
+        )
+
+        self.assertFalse(waiting["round_live"])
+        self.assertEqual(events, [])
+        self.assertTrue(updated["awaiting_map_start"])
+        self.assertEqual(updated["last_map_index"], 1)
+
+        score["_scoreboard"].update(
+            {
+                "currentRoundState": "started",
+                "frozen": False,
+                "roundTimeRemainingMS": 115000,
+            }
+        )
+        started = HltvClient.summarize_scorebot(score, config, planned)
+        advanced, events, _ = advance_subscription(updated, started)
+        self.assertEqual([event["kind"] for event in events], ["map_started"])
+        self.assertNotIn("awaiting_map_start", advanced)
+
     def test_map_over_controls_state_regardless_of_score(self):
         config = {"team1_id": "10", "team2_id": "20"}
         cases = (

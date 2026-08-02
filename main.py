@@ -539,10 +539,6 @@ class HltvPlugin(Star):
                 footer_parts.append(f"另有 {len(data) - len(shown)} 场未显示")
             if delayed:
                 footer_parts.append(f"另有 {len(delayed)} 场延迟或刚开打")
-            if self._sender_id(event):
-                footer_parts.append(
-                    "需要订阅？发送 /hltv live 1 2 3（按卡片序号，可多选）"
-                )
             footer = "  |  ".join(footer_parts)
             if footer:
                 fallback += f"\n\n{footer}"
@@ -555,6 +551,11 @@ class HltvPlugin(Star):
                 footer=footer,
                 log_name="直播卡片",
             )
+            if self._sender_id(event):
+                yield event.plain_result(
+                    "订阅比赛：发送 /hltv live 1 2 3\n"
+                    "数字对应图片中的比赛序号，可多选。"
+                )
         else:
             yield await self._image_or_text(
                 event,
@@ -1039,15 +1040,20 @@ class HltvPlugin(Star):
     async def _live_watch_loop(self):
         while True:
             try:
-                await self._poll_live_subscriptions()
-                await asyncio.sleep(self.live_poll_interval)
+                waiting = await self._poll_live_subscriptions()
+                interval = (
+                    min(self.live_poll_interval, 10)
+                    if waiting
+                    else self.live_poll_interval
+                )
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error(f"[hltv] 直播提醒循环异常: {e!r}")
                 await asyncio.sleep(self.live_poll_interval)
 
-    async def _poll_live_subscriptions(self):
+    async def _poll_live_subscriptions(self) -> bool:
         subscriptions = self.live_subscriptions.all()
         now = int(time())
         active = []
@@ -1130,6 +1136,9 @@ class HltvPlugin(Star):
                         self.live_subscriptions.remove(item)
                     else:
                         self.live_subscriptions.update(updated)
+        return any(
+            item.get("awaiting_map_start") for item in self.live_subscriptions.all()
+        )
 
     # ---------------------------------------------------------------- 生命周期
 
