@@ -1879,6 +1879,48 @@ class TranslatorTests(unittest.TestCase):
     def test_default_timeout_allows_slow_edge_auth(self):
         self.assertEqual(Translator()._timeout, 30)
 
+    def test_bing_config_parser_reads_page_tokens(self):
+        page = (
+            'IG:"abc123" data-iid="translator.5023.1" '
+            'params_AbusePreventionHelper = [123,"token-value",3600000]'
+        )
+
+        self.assertEqual(
+            Translator._parse_bing_config(page),
+            ("abc123", "translator.5023.1", "123", "token-value"),
+        )
+
+    def test_edge_failure_uses_bing_fallback(self):
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        translator = Translator()
+
+        async def run():
+            with (
+                patch("core.translator.aiohttp.ClientSession", return_value=Session()),
+                patch.object(
+                    translator,
+                    "_get_token",
+                    new=AsyncMock(return_value=None),
+                ) as edge,
+                patch.object(
+                    translator,
+                    "_translate_with_bing",
+                    new=AsyncMock(return_value=["中文标题"]),
+                ) as bing,
+            ):
+                result = await translator.translate(["English title"])
+            edge.assert_awaited_once()
+            bing.assert_awaited_once()
+            return result
+
+        self.assertEqual(asyncio.run(run()), ["中文标题"])
+
 
 class PlayerTests(unittest.TestCase):
     HTML = """
