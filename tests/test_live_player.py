@@ -1673,6 +1673,46 @@ class LiveSubscriptionTests(unittest.TestCase):
         self.assertEqual(updated["sent_map_ratings"], [1, 2, 3])
         self.assertTrue(finished)
 
+    def test_final_map_rating_can_arrive_after_match_rating(self):
+        subscription = {"last_map_index": 3, "sent_map_ratings": [1, 2]}
+        total_snapshot = {
+            "status": "finished",
+            "maps": [
+                {"finished": True},
+                {"finished": True},
+                {"finished": True},
+            ],
+            "map_ratings": [],
+            "ratings": [{"team": "A", "players": [{"nickname": "alpha"}]}],
+        }
+
+        waiting, events, finished = advance_subscription(
+            subscription, total_snapshot, now=100
+        )
+        self.assertEqual(events, [])
+        self.assertFalse(finished)
+        self.assertEqual(waiting["finished_seen_at"], 100)
+
+        final_map_snapshot = {
+            **total_snapshot,
+            "map_ratings": [
+                {
+                    "index": 3,
+                    "map": "Ancient",
+                    "ratings": [{"team": "A", "players": []}],
+                }
+            ],
+        }
+        updated, events, finished = advance_subscription(
+            waiting, final_map_snapshot, now=101
+        )
+        self.assertEqual(
+            [event["kind"] for event in events], ["map_finished", "match_finished"]
+        )
+        self.assertEqual(updated["sent_map_ratings"], [1, 2, 3])
+        self.assertNotIn("finished_seen_at", updated)
+        self.assertTrue(finished)
+
 
 class TeamTests(unittest.IsolatedAsyncioTestCase):
     async def test_100t_alias_selects_current_ranked_team(self):

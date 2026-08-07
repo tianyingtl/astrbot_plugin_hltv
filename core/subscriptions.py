@@ -139,16 +139,23 @@ def advance_subscription(
     updated["sent_map_ratings"] = sorted(sent_map_ratings)
 
     if str(snapshot.get("status")) == "finished":
-        if snapshot.get("ratings"):
-            events.append({"kind": "match_finished", "snapshot": snapshot})
-            return updated, events, True
-        current = int(time.time()) if now is None else int(now)
-        first_seen = int(updated.get("finished_seen_at") or 0)
-        if not first_seen:
-            updated["finished_seen_at"] = current
-            return updated, events, False
-        if current - first_seen < max(0, int(rating_wait_seconds)):
-            return updated, events, False
+        completed_map_indexes = {
+            int(item.get("index") or item.get("ordinal") or position)
+            for position, item in enumerate(snapshot.get("maps") or [], start=1)
+            if isinstance(item, dict)
+            and item.get("finished")
+            and str(item.get("index") or item.get("ordinal") or position).isdigit()
+        }
+        waiting_for_map_rating = bool(completed_map_indexes - sent_map_ratings)
+        if waiting_for_map_rating or not snapshot.get("ratings"):
+            current = int(time.time()) if now is None else int(now)
+            first_seen = int(updated.get("finished_seen_at") or 0)
+            if not first_seen:
+                updated["finished_seen_at"] = current
+                return updated, events, False
+            if current - first_seen < max(0, int(rating_wait_seconds)):
+                return updated, events, False
+        updated.pop("finished_seen_at", None)
         events.append({"kind": "match_finished", "snapshot": snapshot})
         return updated, events, True
 
