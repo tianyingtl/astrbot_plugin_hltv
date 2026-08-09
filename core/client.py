@@ -153,6 +153,53 @@ VRS_REGIONS = {
     "美洲": "Americas",
 }
 
+# 常见队名缩写与中文称呼。只做精确别名展开，避免短词误伤其他战队。
+TEAM_ALIASES = {
+    "navi": "Natus Vincere",
+    "fnc": "fnatic",
+    "nip": "Ninjas in Pyjamas",
+    "vit": "Vitality",
+    "蜜蜂": "Vitality",
+    "小蜜蜂": "Vitality",
+    "绿龙": "Spirit",
+    "雪碧": "Spirit",
+    "猎鹰": "Falcons",
+    "a队": "Astralis",
+    "a星": "Astralis",
+    "液体": "Liquid",
+    "老鼠": "MOUZ",
+    "鼠队": "MOUZ",
+    "蒙古": "The MongolZ",
+    "蒙古人": "The MongolZ",
+    "100t": "100 Thieves",
+    "vp": "Virtus.pro",
+    "col": "Complexity",
+    "复杂度": "Complexity",
+    "ef": "Eternal Fire",
+    "永恒之火": "Eternal Fire",
+    "ra": "Rare Atom",
+    "稀有原子": "Rare Atom",
+    "天禄": "TYLOO",
+    "lvg": "Lynn Vision",
+    "林恩愿景": "Lynn Vision",
+    "blg": "Bilibili Gaming",
+    "哔哩哔哩": "Bilibili Gaming",
+    "gl": "GamerLegion",
+    "玩家军团": "GamerLegion",
+    "英勇": "HEROIC",
+    "黑豹": "FURIA",
+}
+
+
+def normalize_team_name(value: Any) -> str:
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(value).lower())
+
+
+def team_query_variants(value: Any) -> tuple[str, ...]:
+    original = str(value or "").strip()
+    canonical = TEAM_ALIASES.get(normalize_team_name(original), original)
+    return tuple(dict.fromkeys(item for item in (original, canonical) if item))
+
 
 # ------------------------------------------------------------------ 缓存键
 # 指令层用它们探测"结果是否已有缓存"（决定要不要发等待提示），
@@ -1341,7 +1388,8 @@ class HltvClient:
 
     async def find_team(self, name: str) -> dict:
         """查战队：先在 HLTV 排名 Top50 内模糊匹配，找不到走站内搜索。"""
-        needle = self._normalize_name(name)
+        variants = team_query_variants(name)
+        needles = [self._normalize_name(value) for value in variants]
         try:
             teams = await self.get_top_teams(50)
         except HltvError:
@@ -1349,17 +1397,21 @@ class HltvClient:
         candidates = [
             t
             for t in teams
-            if needle
-            and (
-                needle in self._normalize_name(t.get("title", ""))
-                or self._normalize_name(t.get("title", "")) in needle
+            if any(
+                needle
+                and (
+                    needle in self._normalize_name(t.get("title", ""))
+                    or self._normalize_name(t.get("title", "")) in needle
+                )
+                for needle in needles
             )
         ]
         matched = (
             min(
                 candidates,
-                key=lambda item: self._name_match_score(
-                    needle, item.get("title") or ""
+                key=lambda item: min(
+                    self._name_match_score(needle, item.get("title") or "")
+                    for needle in needles
                 ),
             )
             if candidates
@@ -1368,17 +1420,21 @@ class HltvClient:
         if matched and matched.get("id"):
             team_id, title = matched["id"], matched.get("title") or name
         else:
+            search_term = variants[-1] if variants else name
             found = [
                 item
-                for item in ((await self._search(name)).get("teams") or [])
+                for item in ((await self._search(search_term)).get("teams") or [])
                 if isinstance(item, dict) and "id" in item
             ]
             if not found:
                 raise HltvError(f"没有找到战队「{name}」。")
             best = min(
                 found,
-                key=lambda item: self._name_match_score(
-                    needle, item.get("name") or item.get("title") or ""
+                key=lambda item: min(
+                    self._name_match_score(
+                        needle, item.get("name") or item.get("title") or ""
+                    )
+                    for needle in needles
                 ),
             )
             team_id = best["id"]
@@ -1387,7 +1443,7 @@ class HltvClient:
 
     @staticmethod
     def _normalize_name(value: Any) -> str:
-        return re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(value).lower())
+        return normalize_team_name(value)
 
     @classmethod
     def _name_match_score(cls, needle: str, candidate: Any) -> tuple[int, int]:
@@ -1423,6 +1479,7 @@ class HltvClient:
             "coach": "",
             "players": [],
             "trophies": [],
+            "major_trophies": [],
             "recent": [],
         }
         h1 = page.find("h1", class_="profile-team-name") or page.find("h1")
@@ -1473,7 +1530,14 @@ class HltvClient:
                 if img is not None:
                     tname = str(img.get("title") or img.get("alt") or "").strip()
             if tname:
-                info["trophies"].append(tname)
+                if tname not in info["trophies"]:
+                    info["trophies"].append(tname)
+                classes = set(titled.get("class") or []) if titled is not None else set()
+                if (
+                    "majorTrophy" in classes
+                    or re.search(r"\bmajor\b", tname, re.IGNORECASE)
+                ) and tname not in info["major_trophies"]:
+                    info["major_trophies"].append(tname)
 
         table = page.find(id="matchesBox")
         if table is not None:

@@ -31,6 +31,7 @@ from .core.client import (
     HltvClient,
     HltvError,
     results_key,
+    team_query_variants,
     vrs_key,
 )
 from .core.renderer import (
@@ -143,16 +144,16 @@ class HltvPlugin(Star):
     @staticmethod
     def _team_query_match(query: str, m: dict) -> bool:
         """队名模糊匹配：规范化(去空格/符号、小写)后做双向子串，
-        让 100t 能命中 "100 Thieves"、mongolz 能命中 "The MongolZ"。"""
+        并展开常见缩写、中文称呼。"""
         def norm(s):
             return re.sub(r"[^0-9a-z一-鿿]", "", str(s).lower())
 
-        q = norm(query)
-        if not q:
+        queries = [norm(value) for value in team_query_variants(query)]
+        if not queries:
             return False
         for t in (m.get("team1", ""), m.get("team2", "")):
             tn = norm(t)
-            if tn and (q in tn or tn in q):
+            if tn and any(q in tn or tn in q for q in queries if q):
                 return True
         return False
 
@@ -327,6 +328,41 @@ class HltvPlugin(Star):
             self._ensure_live_watch_task()
         return watched, already_watching, failures
 
+    def _subscribe_upcoming_matches(
+        self,
+        event: AstrMessageEvent,
+        matches: list[dict],
+    ) -> tuple[int, int, int]:
+        watched = already_watching = failures = 0
+        sender_id = self._sender_id(event)
+        sender_name = self._sender_name(event)
+        umo = str(getattr(event, "unified_msg_origin", ""))
+        if not sender_id or not umo:
+            return 0, 0, len(matches)
+        for match in matches:
+            if not match.get("id") or not match.get("url"):
+                failures += 1
+                continue
+            try:
+                added = self.live_subscriptions.add(
+                    match,
+                    None,
+                    umo=umo,
+                    user_id=sender_id,
+                    user_name=sender_name,
+                    pending_start=True,
+                )
+                if added:
+                    watched += 1
+                else:
+                    already_watching += 1
+            except OSError as e:
+                failures += 1
+                logger.warning(f"[hltv] 保存待开赛订阅失败: {e!r}")
+        if watched:
+            self._ensure_live_watch_task()
+        return watched, already_watching, failures
+
     # ------------------------------------------------------------------ 指令组
 
     @filter.command_group("hltv")
@@ -400,7 +436,7 @@ class HltvPlugin(Star):
     @hltv.command("live", alias={"直播"})
     async def live(self, event: AstrMessageEvent, name: str = ""):
         """正在进行的比赛（默认只看大赛，带比分）；可带队名只看该队"""
-        name = self._rest_after(event, {"live", "直播"}, name)
+        name = self._rest_after(event, {"live", "/live", "直播"}, name)
         if name.lower() in {"cancel", "取消", "退订", "取消订阅"}:
             removed = self.live_subscriptions.remove_user(
                 str(event.unified_msg_origin), self._sender_id(event)
@@ -420,7 +456,7 @@ class HltvPlugin(Star):
             shown = self._get_live_selection(event)
             if not shown:
                 yield event.plain_result(
-                    "订阅编号已过期或尚未生成，请先发送 /hltv live 获取当前列表。"
+                    "订阅编号已过期或尚未生成，请先发送 /live 获取当前列表。"
                 )
                 return
             if any(index <= 0 or index > len(shown) for index in indexes):
@@ -508,9 +544,21 @@ class HltvPlugin(Star):
                     log_name="直播卡片",
                 )
             else:
-                yield event.plain_result(
-                    formatter.format_team_not_live(name, upcoming)
-                )
+                text = formatter.format_team_not_live(name, upcoming)
+                if upcoming:
+                    if not self._sender_id(event):
+                        text += "\n当前平台未提供用户 ID，无法建立开赛 @ 提醒。"
+                    else:
+                        pending, existing, failures = self._subscribe_upcoming_matches(
+                            event, [upcoming]
+                        )
+                        if pending:
+                            text += "\n已订阅这场比赛，图一正式开始后会 @ 你。"
+                        elif existing:
+                            text += "\n这场待开赛比赛已在监听，图一开始后会 @ 你。"
+                        elif failures:
+                            text += "\n订阅保存失败，请稍后重试。"
+                yield event.plain_result(text)
             return
         try:
             data = self._filter_by_event(
@@ -521,24 +569,17 @@ class HltvPlugin(Star):
                 alt = await self.client.get_live_matches()
                 if alt:
                     data, note = alt, "（当前无大赛直播，已显示全部场次）"
-            # 延迟场次：过了开赛时间但 HLTV 还没标 live 的比赛,
-            # 不显示会让用户以为比赛消失了
-            delayed = self._filter_by_event(
-                await self.client.get_delayed_matches(min_stars=self.min_stars)
-            )
         except HltvError as e:
             yield event.plain_result(str(e))
             return
         shown = data[:4]
         await self._fetch_live_scores(shown, 4)
-        fallback = formatter.format_live(shown, note, delayed)
+        fallback = formatter.format_live(shown, note)
         if data:
             self._remember_live_selection(event, shown)
             footer_parts = []
             if len(data) > len(shown):
                 footer_parts.append(f"另有 {len(data) - len(shown)} 场未显示")
-            if delayed:
-                footer_parts.append(f"另有 {len(delayed)} 场延迟或刚开打")
             footer = "  |  ".join(footer_parts)
             if footer:
                 fallback += f"\n\n{footer}"
@@ -553,18 +594,16 @@ class HltvPlugin(Star):
             )
             if self._sender_id(event):
                 yield event.plain_result(
-                    "订阅比赛：发送 /hltv live 1 2 3\n"
+                    "订阅直播：发送 /live 1 2 3\n"
                     "数字对应图片中的比赛序号，可多选。"
                 )
         else:
             yield await self._image_or_text(
                 event,
-                render_matches_card,
+                render_live_card,
                 fallback,
-                self._limit_items(delayed),
-                "延迟或刚开打",
-                subtitle="已过预定时间，HLTV 暂无直播比分",
-                log_name="延迟比赛卡片",
+                [],
+                log_name="直播卡片",
             )
 
     @hltv.command("results", alias={"赛果", "结果"})
@@ -933,16 +972,24 @@ class HltvPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def catch_hltv_messages(self, event: AstrMessageEvent):
-        """两件事：
-        1. 免 @ 响应——群里没 @ 机器人、全局唤醒前缀也没命中时，
+        """三件事：
+        1. 将 /live 作为 /hltv live 的快捷入口；
+        2. 免 @ 响应——群里没 @ 机器人、全局唤醒前缀也没命中时，
            以 /hltv 开头的消息由本插件自行分发（free_wake 配置可关）；
-        2. 正常唤醒但子指令拼错时给纠错提示（框架对未知子指令静默）。
+        3. 正常唤醒但子指令拼错时给纠错提示（框架对未知子指令静默）。
         合法指令走框架派发，这里会跳过，不会重复回复。"""
         tokens = (event.message_str or "").strip().split()
         if not tokens:
             return
         head = tokens[0].lower()
-        if getattr(event, "is_at_or_wake_command", False):
+        woke = bool(getattr(event, "is_at_or_wake_command", False))
+        if head == "/live" or (head == "live" and woke):
+            if not self.free_wake and not woke:
+                return
+            async for r in self.live(event):
+                yield r
+            return
+        if woke:
             # 已唤醒：唤醒前缀已被剥掉，首 token 是 "hltv"
             if head != "hltv" or len(tokens) < 2:
                 return
@@ -1058,12 +1105,19 @@ class HltvPlugin(Star):
         now = int(time())
         active = []
         for item in subscriptions:
-            if now - int(item.get("created_at") or now) >= 12 * 60 * 60:
+            created_at = int(item.get("created_at") or now)
+            expires_at = created_at + 12 * 60 * 60
+            if item.get("pending_start") and int(item.get("start_unix") or 0):
+                expires_at = int(item["start_unix"]) + 12 * 60 * 60
+            if now >= expires_at:
                 self.live_subscriptions.remove(item)
             else:
                 active.append(item)
         grouped: dict[tuple[str, str], list[dict]] = {}
         for item in active:
+            start_unix = int(item.get("start_unix") or 0)
+            if item.get("pending_start") and start_unix > now + 10 * 60:
+                continue
             key = (str(item.get("match_id") or ""), str(item.get("url") or ""))
             grouped.setdefault(key, []).append(item)
 

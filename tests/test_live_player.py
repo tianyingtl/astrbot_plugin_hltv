@@ -28,6 +28,7 @@ from core.formatter import (
     format_news,
     format_news_detail,
     format_player,
+    format_team,
     news_titles,
 )
 from core.renderer import (
@@ -1578,6 +1579,79 @@ class LiveSubscriptionTests(unittest.TestCase):
 
             self.assertEqual(store.all()[0]["sent_map_ratings"], [1])
 
+    def test_store_can_persist_a_match_waiting_to_start(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LiveSubscriptionStore(Path(temp) / "subscriptions.json")
+            store.add(
+                {
+                    "id": "456",
+                    "url": "/matches/456/test",
+                    "team1": "NAVI",
+                    "team2": "Vitality",
+                    "unix": 1234567890,
+                },
+                None,
+                umo="group:1",
+                user_id="42",
+                user_name="Chiaki",
+                pending_start=True,
+            )
+
+            item = LiveSubscriptionStore(store.path).all()[0]
+            self.assertTrue(item["pending_start"])
+            self.assertEqual(item["start_unix"], 1234567890)
+            self.assertEqual(item["last_map_index"], 0)
+
+    def test_pending_match_notifies_once_when_first_map_really_starts(self):
+        subscription = {
+            "pending_start": True,
+            "last_map_index": 0,
+            "last_map_name": "",
+        }
+        before = {
+            "status": "live",
+            "active_map_index": 0,
+            "current_map_name": "",
+            "current_score": "",
+        }
+        waiting, events, _ = advance_subscription(subscription, before, now=100)
+        self.assertEqual(events, [])
+
+        freeze_time = {
+            **before,
+            "active_map_index": 1,
+            "current_map_name": "Mirage",
+            "current_score": "0:0",
+            "round_live": False,
+        }
+        waiting, events, _ = advance_subscription(waiting, freeze_time, now=101)
+        self.assertEqual(events, [])
+        self.assertTrue(waiting["awaiting_map_start"])
+
+        running = {**freeze_time, "round_live": True}
+        started, events, _ = advance_subscription(waiting, running, now=102)
+        self.assertEqual([event["kind"] for event in events], ["map_started"])
+        self.assertNotIn("pending_start", started)
+        self.assertNotIn("awaiting_map_start", started)
+        self.assertEqual(started["last_map_index"], 1)
+        _, repeated, _ = advance_subscription(started, running, now=103)
+        self.assertEqual(repeated, [])
+
+    def test_pending_match_page_fallback_waits_until_score_moves(self):
+        subscription = {"pending_start": True, "last_map_index": 0}
+        snapshot = {
+            "status": "live",
+            "active_map_index": 1,
+            "current_map_name": "Ancient",
+            "current_score": "0:0",
+        }
+
+        waiting, events, _ = advance_subscription(subscription, snapshot, now=100)
+        self.assertEqual(events, [])
+        snapshot["current_score"] = "1:0"
+        _, events, _ = advance_subscription(waiting, snapshot, now=101)
+        self.assertEqual([event["kind"] for event in events], ["map_started"])
+
     def test_map_transition_notifies_only_once(self):
         subscription = {"last_map_index": 1, "last_map_name": "Anubis"}
         snapshot = {"status": "live", "active_map_index": 2, "current_map_name": "Mirage"}
@@ -1736,6 +1810,94 @@ class TeamTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(team, {"id": "777", "title": "100 Thieves"})
 
+    async def test_common_short_and_chinese_names_match_ranked_teams(self):
+        teams = [
+            {"id": str(index), "title": title}
+            for index, title in enumerate(
+                [
+                    "Natus Vincere",
+                    "fnatic",
+                    "Ninjas in Pyjamas",
+                    "Vitality",
+                    "Spirit",
+                    "Falcons",
+                    "Astralis",
+                    "Liquid",
+                    "MOUZ",
+                    "The MongolZ",
+                    "Virtus.pro",
+                    "Complexity",
+                    "Eternal Fire",
+                    "Rare Atom",
+                    "TYLOO",
+                    "Lynn Vision",
+                ],
+                start=1,
+            )
+        ]
+        client = HltvClient(cache_ttl=0)
+        client.get_top_teams = AsyncMock(return_value=teams)
+        client.get_team_details = AsyncMock(
+            side_effect=lambda team_id, title: {"id": team_id, "title": title}
+        )
+        cases = {
+            "NAVI": "Natus Vincere",
+            "FNC": "fnatic",
+            "NIP": "Ninjas in Pyjamas",
+            "蜜蜂": "Vitality",
+            "绿龙": "Spirit",
+            "猎鹰": "Falcons",
+            "A队": "Astralis",
+            "液体": "Liquid",
+            "鼠队": "MOUZ",
+            "蒙古": "The MongolZ",
+            "VP": "Virtus.pro",
+            "COL": "Complexity",
+            "EF": "Eternal Fire",
+            "RA": "Rare Atom",
+            "天禄": "TYLOO",
+            "LVG": "Lynn Vision",
+        }
+
+        for alias, expected in cases.items():
+            with self.subTest(alias=alias):
+                self.assertEqual((await client.find_team(alias))["title"], expected)
+
+    async def test_chinese_alias_uses_canonical_name_for_site_search(self):
+        client = HltvClient(cache_ttl=0)
+        client.get_top_teams = AsyncMock(return_value=[])
+        client._search = AsyncMock(
+            return_value={"teams": [{"id": "11283", "name": "Falcons"}]}
+        )
+        client.get_team_details = AsyncMock(
+            side_effect=lambda team_id, title: {"id": team_id, "title": title}
+        )
+
+        team = await client.find_team("猎鹰")
+
+        client._search.assert_awaited_once_with("Falcons")
+        self.assertEqual(team["title"], "Falcons")
+
+    def test_team_major_trophies_are_parsed_and_formatted(self):
+        page = BeautifulSoup(
+            """
+            <h1 class="profile-team-name">Natus Vincere</h1>
+            <div class="trophyHolder">
+              <span class="trophyDescription majorTrophy" title="PGL Major Stockholm 2021"></span>
+            </div>
+            <div class="trophyHolder">
+              <span class="trophyDescription" title="IEM Cologne 2021"></span>
+            </div>
+            """,
+            "lxml",
+        )
+
+        team = HltvClient._parse_team_page(page, "Natus Vincere")
+
+        self.assertEqual(team["major_trophies"], ["PGL Major Stockholm 2021"])
+        self.assertEqual(len(team["trophies"]), 2)
+        self.assertIn("Major 冠军：PGL Major Stockholm 2021", format_team(team))
+
     def test_team_history_uses_real_opponent_score_and_result(self):
         html = """
         <h1 class="profile-team-name">100 Thieves</h1>
@@ -1793,6 +1955,7 @@ class RendererTests(unittest.TestCase):
                 for index in range(5)
             ],
             "trophies": [f"Championship {index}" for index in range(1, 7)],
+            "major_trophies": ["Championship 1", "Championship 4"],
         }
         player = {
             "nickname": "ZywOo",

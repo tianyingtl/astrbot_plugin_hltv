@@ -348,7 +348,15 @@ def render_team_card(
     age = str(team.get("age") or "-")
     _metric(draw, 768, 270, "平均年龄", age, 260)
     trophies = list(team.get("trophies") or [])
-    _metric(draw, 1116, 270, "奖杯", str(len(trophies)), 260)
+    major_trophies = list(team.get("major_trophies") or [])
+    _metric(
+        draw,
+        1116,
+        270,
+        "Major / 奖杯",
+        f"{len(major_trophies)} / {len(trophies)}",
+        260,
+    )
 
     _divider(draw, 420)
     _label(draw, (72, 454), "现役阵容")
@@ -391,12 +399,16 @@ def render_team_card(
             fill=INK,
         )
 
-    _label(draw, (820, 714), "奖杯")
+    _label(draw, (820, 714), "冠军奖杯")
     trophy_font = _font(24)
     if trophies:
-        for index, trophy in enumerate(trophies[:6]):
+        ordered_trophies = major_trophies + [
+            trophy for trophy in trophies if trophy not in major_trophies
+        ]
+        for index, trophy in enumerate(ordered_trophies[:6]):
             y = 760 + index * 36
-            draw.text((820, y), f"{index + 1:02d}", font=_font(19, True), fill=ACCENT)
+            marker = "M" if trophy in major_trophies else f"{index + 1:02d}"
+            draw.text((820, y), marker, font=_font(19, True), fill=ACCENT)
             draw.text(
                 (884, y - 3),
                 _ellipsize(draw, trophy, trophy_font, 620),

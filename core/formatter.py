@@ -371,6 +371,11 @@ def format_team(team: dict) -> str:
         lines.append("、".join(stats))
 
     trophies = team.get("trophies") or []
+    majors = team.get("major_trophies") or []
+    if majors:
+        head = "、".join(majors[:3])
+        more = f" 等 {len(majors)} 冠" if len(majors) > 3 else ""
+        lines.append(f"🏆 Major 冠军：{head}{more}")
     if trophies:
         head = "、".join(trophies[:3])
         more = f" 等 {len(trophies)} 座" if len(trophies) > 3 else ""
@@ -476,17 +481,17 @@ def format_news_detail(
 HELP_TEXT = """🎮 HLTV 查询插件
 /hltv today — 今日赛程（大赛）
 /hltv matches [天数] — 近期大赛
-/hltv live — 直播小局/大局比分，并显示可订阅序号
-/hltv live 1 2 3 — 按卡片序号批量订阅比赛
-/hltv live <队名> — 查看指定战队并自动订阅
-/hltv live 取消 — 取消你的直播提醒
+/live 或 /hltv live — 只查看正在进行的比赛，不自动订阅
+/live 1 2 3 — 按卡片序号批量订阅比赛
+/live <队名> — 查看指定战队，未开赛时订阅今日比赛
+/live 取消 — 取消你的直播提醒
 /hltv results [天数] — 近期赛果
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名
 /hltv ranking hltv — HLTV 自家排名
 /hltv top20 [年份] [名次] — 年度榜单或指定名次新闻（默认上一年）
 /hltv events — 近期赛事
-/hltv team <名称> — 战队详情图片卡（任意战队，支持空格）
+/hltv team <名称> — 战队详情图片卡（支持缩写、中文称呼）
 /hltv player <昵称> — 选手生涯荣誉图片卡
 /hltv news [序号] — 今日新闻（中英双语标题，带序号看详情）
 /hltv sub — 在本会话订阅每日赛程推送（unsub 退订）

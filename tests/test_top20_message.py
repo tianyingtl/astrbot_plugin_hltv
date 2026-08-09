@@ -155,6 +155,9 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
             async def get_delayed_matches(self, min_stars=0):
                 return []
 
+            async def get_matches(self, days=1, min_stars=0):
+                return []
+
         class Event:
             message_str = "/hltv live"
 
@@ -209,6 +212,9 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
             async def get_delayed_matches(self, min_stars=0):
                 return []
 
+            async def get_matches(self, days=1, min_stars=0):
+                return []
+
         class Event:
             unified_msg_origin = "group:1"
 
@@ -259,7 +265,7 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(listing[0], ("image", "live.png"))
             self.assertEqual(len(listing), 2)
-            self.assertIn("/hltv live 1 2 3", listing[1])
+            self.assertIn("/live 1 2 3", listing[1])
             self.assertIn("已订阅 2 场", subscribed[0])
             self.assertIn("Team 1A vs Team 1B", subscribed[0])
             self.assertIn("Team 3A vs Team 3B", subscribed[0])
@@ -268,6 +274,173 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                 [item["match_id"] for item in plugin.live_subscriptions.all()],
                 ["1", "3", "2"],
             )
+
+    async def test_plain_live_only_lists_active_matches_without_subscribing(self):
+        module = _load_main_module()
+
+        class Client:
+            async def get_live_matches(self, min_stars=0):
+                return []
+
+            async def get_delayed_matches(self, min_stars=0):
+                raise AssertionError("plain /live must not query delayed matches")
+
+            async def get_matches(self, days=1, min_stars=0):
+                raise AssertionError("plain /live must not query upcoming matches")
+
+        class Event:
+            message_str = "/live"
+            unified_msg_origin = "group:1"
+
+            @staticmethod
+            def get_sender_id():
+                return "42"
+
+            @staticmethod
+            def get_sender_name():
+                return "Chiaki"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+            @staticmethod
+            def image_result(path):
+                return ("image", path)
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.send_waiting_tip = False
+        plugin.min_stars = 0
+        plugin.event_keywords = []
+        plugin.max_items = 10
+        plugin._ensure_live_watch_task = lambda: None
+
+        with tempfile.TemporaryDirectory() as temp:
+            plugin.live_subscriptions = module.LiveSubscriptionStore(
+                Path(temp) / "subscriptions.json"
+            )
+            with patch.object(
+                module, "render_live_card", return_value=Path("live.png")
+            ):
+                results = [result async for result in plugin.live(Event())]
+
+            self.assertEqual(results, [("image", "live.png")])
+            self.assertEqual(plugin.live_subscriptions.all(), [])
+
+    async def test_live_team_subscribes_its_upcoming_match(self):
+        module = _load_main_module()
+        upcoming = {
+            "id": "9001",
+            "url": "https://www.hltv.org/matches/9001/test",
+            "team1": "Fluxo",
+            "team2": "fnatic",
+            "event": "IEM Test",
+            "rating": 3,
+            "unix": int(module.time()) + 3600,
+            "date": "09-08-2026",
+            "time": "17:00",
+            "live": False,
+            "late": False,
+        }
+
+        class Client:
+            async def get_live_matches(self, min_stars=0):
+                return []
+
+            async def get_matches(self, days=1, min_stars=0):
+                return [upcoming]
+
+        class Event:
+            message_str = "/live FNC"
+            unified_msg_origin = "group:1"
+
+            @staticmethod
+            def get_sender_id():
+                return "42"
+
+            @staticmethod
+            def get_sender_name():
+                return "Chiaki"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.send_waiting_tip = False
+        plugin._ensure_live_watch_task = lambda: None
+
+        with tempfile.TemporaryDirectory() as temp:
+            plugin.live_subscriptions = module.LiveSubscriptionStore(
+                Path(temp) / "subscriptions.json"
+            )
+            results = [result async for result in plugin.live(Event())]
+
+            self.assertEqual(len(results), 1)
+            self.assertIn("已订阅这场比赛", results[0])
+            item = plugin.live_subscriptions.all()[0]
+            self.assertEqual(item["match_id"], "9001")
+            self.assertTrue(item["pending_start"])
+
+    async def test_slash_live_is_dispatched_as_a_shortcut(self):
+        module = _load_main_module()
+
+        class Event:
+            message_str = "/live"
+            is_at_or_wake_command = False
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.free_wake = True
+
+        async def fake_live(_event):
+            yield "shortcut"
+
+        plugin.live = fake_live
+        results = [result async for result in plugin.catch_hltv_messages(Event())]
+
+        self.assertEqual(results, ["shortcut"])
+
+    def test_live_team_filter_uses_short_and_chinese_aliases(self):
+        module = _load_main_module()
+        match = {"team1": "Natus Vincere", "team2": "Vitality"}
+
+        for query in ("NAVI", "蜜蜂", "小蜜蜂"):
+            with self.subTest(query=query):
+                self.assertTrue(module.HltvPlugin._team_query_match(query, match))
+        self.assertFalse(module.HltvPlugin._team_query_match("NIP", match))
+
+    async def test_far_upcoming_subscription_is_not_polled_early(self):
+        module = _load_main_module()
+        now = int(module.time())
+
+        class Store:
+            def __init__(self):
+                self.item = {
+                    "match_id": "9001",
+                    "url": "/matches/9001/test",
+                    "umo": "group:1",
+                    "user_id": "42",
+                    "created_at": now,
+                    "pending_start": True,
+                    "start_unix": now + 3600,
+                }
+
+            def all(self):
+                return [self.item]
+
+            def remove(self, _item):
+                raise AssertionError("future subscription must be kept")
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.live_subscriptions = Store()
+        plugin.client = types.SimpleNamespace(get_match_snapshot=AsyncMock())
+
+        waiting = await plugin._poll_live_subscriptions()
+
+        self.assertFalse(waiting)
+        plugin.client.get_match_snapshot.assert_not_awaited()
 
     async def test_watch_loop_polls_faster_while_waiting_for_map_start(self):
         module = _load_main_module()

@@ -48,12 +48,14 @@ class LiveSubscriptionStore:
     def add(
         self,
         match: dict,
-        snapshot: dict,
+        snapshot: dict | None,
         *,
         umo: str,
         user_id: str,
         user_name: str,
+        pending_start: bool = False,
     ) -> bool:
+        snapshot = snapshot or {}
         item = {
             "match_id": str(match.get("id") or ""),
             "url": str(match.get("url") or ""),
@@ -75,6 +77,12 @@ class LiveSubscriptionStore:
             ),
             "created_at": int(time.time()),
         }
+        if pending_start:
+            item["pending_start"] = True
+            try:
+                item["start_unix"] = int(float(match.get("unix") or 0))
+            except (TypeError, ValueError):
+                item["start_unix"] = 0
         key = subscription_key(item)
         if not all(key) or any(subscription_key(old) == key for old in self._items):
             return False
@@ -111,6 +119,21 @@ class LiveSubscriptionStore:
         if removed:
             self._save()
         return removed
+
+
+def _first_map_started(snapshot: dict) -> bool:
+    if int(snapshot.get("active_map_index") or 0) <= 0:
+        return False
+    if not str(snapshot.get("current_map_name") or "").strip():
+        return False
+    if snapshot.get("round_live") is not None:
+        return snapshot.get("round_live") is True
+    score = str(snapshot.get("current_score") or "").strip()
+    try:
+        left, right = (int(value) for value in score.split(":"))
+    except (TypeError, ValueError):
+        return False
+    return left + right > 0
 
 
 def advance_subscription(
@@ -164,6 +187,19 @@ def advance_subscription(
     current_index = int(snapshot.get("active_map_index") or 0)
     previous_name = str(updated.get("last_map_name") or "")
     current_name = str(snapshot.get("current_map_name") or "")
+    if updated.get("pending_start"):
+        if not _first_map_started(snapshot):
+            if current_index and current_name:
+                updated["awaiting_map_start"] = True
+            return updated, events, False
+        events.append({"kind": "map_started", "snapshot": snapshot})
+        updated.pop("pending_start", None)
+        updated.pop("awaiting_map_start", None)
+        updated.pop("start_unix", None)
+        updated["created_at"] = int(time.time()) if now is None else int(now)
+        updated["last_map_index"] = current_index
+        updated["last_map_name"] = current_name
+        return updated, events, False
     map_changed = (previous_index and current_index > previous_index) or (
         previous_name
         and current_name
