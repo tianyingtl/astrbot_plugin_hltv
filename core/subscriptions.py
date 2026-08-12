@@ -136,6 +136,11 @@ def _first_map_started(snapshot: dict) -> bool:
     return left + right > 0
 
 
+def _is_bo1(snapshot: dict) -> bool:
+    best_of = str(snapshot.get("best_of") or "").upper().replace(" ", "")
+    return best_of in {"BO1", "BESTOF1"}
+
+
 def advance_subscription(
     subscription: dict,
     snapshot: dict,
@@ -145,6 +150,7 @@ def advance_subscription(
 ) -> tuple[dict, list[dict], bool]:
     """用一次比赛快照推进订阅，返回（新状态、事件、是否完成）。"""
     updated = dict(subscription)
+    is_bo1 = _is_bo1(snapshot)
     sent_map_ratings = {
         int(index)
         for index in (updated.get("sent_map_ratings") or [])
@@ -159,9 +165,14 @@ def advance_subscription(
             {"kind": "map_finished", "snapshot": snapshot, "map": map_rating}
         )
         sent_map_ratings.add(index)
+        if is_bo1:
+            updated["bo1_rating_sent"] = True
     updated["sent_map_ratings"] = sorted(sent_map_ratings)
 
     if str(snapshot.get("status")) == "finished":
+        if is_bo1 and updated.get("bo1_rating_sent"):
+            updated.pop("finished_seen_at", None)
+            return updated, events, True
         completed_map_indexes = {
             int(item.get("index") or item.get("ordinal") or position)
             for position, item in enumerate(snapshot.get("maps") or [], start=1)
@@ -169,7 +180,9 @@ def advance_subscription(
             and item.get("finished")
             and str(item.get("index") or item.get("ordinal") or position).isdigit()
         }
-        waiting_for_map_rating = bool(completed_map_indexes - sent_map_ratings)
+        waiting_for_map_rating = bool(
+            completed_map_indexes - sent_map_ratings
+        ) and not is_bo1
         if waiting_for_map_rating or not snapshot.get("ratings"):
             current = int(time.time()) if now is None else int(now)
             first_seen = int(updated.get("finished_seen_at") or 0)

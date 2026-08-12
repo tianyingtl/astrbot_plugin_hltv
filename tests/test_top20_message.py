@@ -546,6 +546,7 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
         module = _load_main_module()
         snapshot = {
             "status": "finished",
+            "best_of": "BO3",
             "team1": "FaZe",
             "team2": "Spirit",
             "event": "Test Event",
@@ -619,6 +620,74 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(plugin.context.sent[0][1][-1], ("image", "map-rating.png"))
         self.assertEqual(plugin.context.sent[1][1][-1], ("image", "match-rating.png"))
+        self.assertTrue(plugin.live_subscriptions.removed)
+
+    async def test_bo1_sends_only_one_rating_image(self):
+        module = _load_main_module()
+        snapshot = {
+            "status": "finished",
+            "best_of": "BO1",
+            "team1": "Team A",
+            "team2": "Team B",
+            "maps": [{"ordinal": 1, "finished": True}],
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "score": "13:9",
+                    "ratings": [{"team": "Team A", "players": [{"nickname": "a"}]}],
+                }
+            ],
+            "ratings": [{"team": "Team A", "players": [{"nickname": "a"}]}],
+        }
+
+        class Client:
+            async def get_match_snapshot(self, match_id, url, watch=False):
+                return snapshot
+
+        class Store:
+            def __init__(self):
+                self.item = {
+                    "match_id": "123",
+                    "url": "/matches/123/test",
+                    "umo": "group:1",
+                    "user_id": "42",
+                    "last_map_index": 1,
+                    "sent_map_ratings": [],
+                }
+                self.removed = False
+
+            def all(self):
+                return [self.item]
+
+            def contains(self, item):
+                return not self.removed
+
+            def update(self, item):
+                self.item = item
+
+            def remove(self, item):
+                self.removed = True
+
+        class Context:
+            def __init__(self):
+                self.sent = []
+
+            async def send_message(self, umo, chain):
+                self.sent.append(chain.chain)
+                return True
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.context = Context()
+        plugin.live_subscriptions = Store()
+
+        with patch.object(module, "render_rating_card", return_value=Path("bo1.png")) as render:
+            await plugin._poll_live_subscriptions()
+
+        self.assertEqual(len(plugin.context.sent), 1)
+        self.assertEqual(plugin.context.sent[0][-1], ("image", "bo1.png"))
+        self.assertEqual(render.call_count, 1)
         self.assertTrue(plugin.live_subscriptions.removed)
 
 

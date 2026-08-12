@@ -1734,6 +1734,7 @@ class LiveSubscriptionTests(unittest.TestCase):
         subscription = {"last_map_index": 1, "sent_map_ratings": []}
         snapshot = {
             "status": "live",
+            "best_of": "BO3",
             "active_map_index": 1,
             "current_map_name": "Nuke",
             "map_ratings": [
@@ -1789,6 +1790,7 @@ class LiveSubscriptionTests(unittest.TestCase):
         subscription = {"last_map_index": 3, "sent_map_ratings": [1, 2]}
         snapshot = {
             "status": "finished",
+            "best_of": "BO3",
             "map_ratings": [
                 {"index": 1, "map": "Nuke", "ratings": []},
                 {"index": 2, "map": "Mirage", "ratings": []},
@@ -1813,6 +1815,59 @@ class LiveSubscriptionTests(unittest.TestCase):
             ["map_finished", "match_finished"],
         )
         self.assertEqual(updated["sent_map_ratings"], [1, 2, 3])
+        self.assertTrue(finished)
+
+    def test_bo1_emits_only_one_rating_event(self):
+        subscription = {"last_map_index": 1, "sent_map_ratings": []}
+        snapshot = {
+            "status": "finished",
+            "best_of": "BO1",
+            "maps": [{"ordinal": 1, "finished": True}],
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "ratings": [{"team": "A", "players": [{"nickname": "alpha"}]}],
+                }
+            ],
+            "ratings": [
+                {"team": "A", "players": [{"nickname": "alpha", "rating": "1.20"}]}
+            ],
+        }
+
+        updated, events, finished = advance_subscription(subscription, snapshot)
+
+        self.assertEqual([event["kind"] for event in events], ["map_finished"])
+        self.assertTrue(updated["bo1_rating_sent"])
+        self.assertTrue(finished)
+
+    def test_bo1_does_not_repeat_rating_when_finish_status_arrives_later(self):
+        subscription = {"last_map_index": 1, "sent_map_ratings": []}
+        map_rated = {
+            "status": "live",
+            "best_of": "BO1",
+            "active_map_index": 1,
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "ratings": [{"team": "A", "players": [{"nickname": "alpha"}]}],
+                }
+            ],
+        }
+        updated, events, finished = advance_subscription(subscription, map_rated)
+        self.assertEqual([event["kind"] for event in events], ["map_finished"])
+        self.assertFalse(finished)
+
+        completed = {
+            **map_rated,
+            "status": "finished",
+            "maps": [{"ordinal": 1, "finished": True}],
+            "ratings": [{"team": "A", "players": [{"nickname": "alpha"}]}],
+        }
+        _, events, finished = advance_subscription(updated, completed)
+
+        self.assertEqual(events, [])
         self.assertTrue(finished)
 
     def test_final_map_rating_can_arrive_after_match_rating(self):
