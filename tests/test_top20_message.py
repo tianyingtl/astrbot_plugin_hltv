@@ -256,7 +256,9 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                     async for result in plugin.live(Event("/hltv live 1 3"))
                 ]
             with patch.object(
-                module, "render_live_card", side_effect=RuntimeError("force text fallback")
+                module,
+                "render_live_detail_card",
+                side_effect=RuntimeError("force text fallback"),
             ):
                 team_subscribed = [
                     result
@@ -265,7 +267,10 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(listing[0], ("image", "live.png"))
             self.assertEqual(len(listing), 2)
-            self.assertIn("/live 1 2 3", listing[1])
+            self.assertIn("/hltv live 1 2 3", listing[1])
+            self.assertIn("/hltv live 战队名", listing[1])
+            self.assertIn("想订阅比赛", listing[1])
+            self.assertIn("想看某场实时战绩或订阅指定战队", listing[1])
             self.assertIn("已订阅 2 场", subscribed[0])
             self.assertIn("Team 1A vs Team 1B", subscribed[0])
             self.assertIn("Team 3A vs Team 3B", subscribed[0])
@@ -274,6 +279,88 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                 [item["match_id"] for item in plugin.live_subscriptions.all()],
                 ["1", "3", "2"],
             )
+
+    async def test_live_team_uses_detail_snapshot_and_single_detail_card(self):
+        module = _load_main_module()
+        match = {
+            "id": "123",
+            "url": "https://www.hltv.org/matches/123/test",
+            "team1": "Spirit",
+            "team2": "JiJieHao",
+            "event": "EWC",
+            "live": True,
+        }
+        snapshot = {
+            **match,
+            "status": "live",
+            "best_of": "BO3",
+            "current_map_name": "Mirage",
+            "current_score": "9:10",
+            "maps_score": "0:0",
+            "active_map_index": 1,
+            "maps": [
+                {"map": "Mirage", "played": True, "finished": False, "ordinal": 1},
+                {"map": "Nuke", "played": False, "finished": False, "ordinal": 2},
+                {"map": "Ancient", "played": False, "finished": False, "ordinal": 3},
+            ],
+            "live_stats": [
+                {"team_id": "10", "players": [{"nickname": "donk", "kd": "20-13"}]},
+                {"team_id": "20", "players": [{"nickname": "sinnopsyy", "kd": "15-13"}]},
+            ],
+            "map_ratings": [],
+        }
+
+        class Client:
+            get_match_snapshot = AsyncMock(return_value=snapshot)
+
+            async def get_live_matches(self, min_stars=0):
+                return [dict(match)]
+
+            async def get_live_snapshot(self, _match):
+                raise AssertionError("detail snapshot should be used")
+
+        class Event:
+            message_str = "/hltv live Spirit"
+            unified_msg_origin = "group:1"
+
+            @staticmethod
+            def get_sender_id():
+                return "42"
+
+            @staticmethod
+            def get_sender_name():
+                return "Chiaki"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+            @staticmethod
+            def image_result(path):
+                return ("image", path)
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.send_waiting_tip = False
+        plugin._ensure_live_watch_task = lambda: None
+
+        with tempfile.TemporaryDirectory() as temp:
+            plugin.live_subscriptions = module.LiveSubscriptionStore(
+                Path(temp) / "subscriptions.json"
+            )
+            with patch.object(
+                module, "render_live_detail_card", return_value=Path("detail.png")
+            ) as render:
+                results = [result async for result in plugin.live(Event())]
+
+        self.assertEqual(results, [("image", "detail.png")])
+        plugin.client.get_match_snapshot.assert_awaited_once_with(
+            "123", match["url"], watch=True
+        )
+        rendered = render.call_args.args[0]
+        self.assertEqual(len(rendered["maps"]), 3)
+        self.assertEqual(len(rendered["live_stats"]), 2)
+        self.assertEqual(len(plugin.live_subscriptions.all()), 1)
 
     async def test_plain_live_only_lists_active_matches_without_subscribing(self):
         module = _load_main_module()

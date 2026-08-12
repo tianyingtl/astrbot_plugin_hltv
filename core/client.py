@@ -1031,6 +1031,49 @@ class HltvClient:
         return result
 
     @classmethod
+    def _scoreboard_player_stats(cls, scoreboard: Any, config: dict) -> list[dict]:
+        if not isinstance(scoreboard, dict) or scoreboard.get("live") is False:
+            return []
+        team1_id, team2_id = config["team1_id"], config["team2_id"]
+        sides = {
+            str(scoreboard.get("ctTeamId") or ""): scoreboard.get("CT") or [],
+            str(scoreboard.get("tTeamId") or ""): scoreboard.get("TERRORIST") or [],
+        }
+        try:
+            rounds = int(scoreboard.get("ctTeamScore") or 0) + int(
+                scoreboard.get("tTeamScore") or 0
+            )
+        except (TypeError, ValueError):
+            rounds = 0
+
+        teams = []
+        for team_id in (team1_id, team2_id):
+            players = []
+            for raw in sides.get(team_id, [])[:5]:
+                if not isinstance(raw, dict):
+                    continue
+                kills = int(raw.get("score") or 0)
+                deaths = int(raw.get("deaths") or 0)
+                assists = int(raw.get("assists") or 0)
+                advanced = raw.get("advancedStats") or {}
+                kast_rounds = int(advanced.get("kast") or 0)
+                players.append(
+                    {
+                        "nickname": str(raw.get("nick") or raw.get("name") or "?"),
+                        "kd": f"{kills}-{deaths}",
+                        "diff": f"{kills - deaths:+d}",
+                        "assists": str(assists),
+                        "adr": f"{float(raw.get('damagePrRound') or 0):.1f}",
+                        "kast": (
+                            f"{kast_rounds / rounds * 100:.1f}%" if rounds else "-"
+                        ),
+                    }
+                )
+            if players:
+                teams.append({"team_id": team_id, "players": players})
+        return teams
+
+    @classmethod
     def summarize_scorebot(
         cls, score: dict, config: dict, planned_maps: list[dict]
     ) -> dict:
@@ -1047,7 +1090,7 @@ class HltvClient:
             entries.append((ordinal, value))
         entries.sort(key=lambda item: item[0])
 
-        maps = []
+        parsed_maps = {}
         for ordinal, value in entries:
             scores = value.get("scores") or {}
             s1 = cls._scorebot_value(scores, team1_id)
@@ -1062,14 +1105,32 @@ class HltvClient:
             winner = 0
             if finished and isinstance(s1, int) and isinstance(s2, int) and s1 != s2:
                 winner = 1 if s1 > s2 else 2
+            parsed_maps[ordinal] = {
+                "map": name,
+                "s1": str(s1) if isinstance(s1, int) else "-",
+                "s2": str(s2) if isinstance(s2, int) else "-",
+                "played": True,
+                "finished": finished,
+                "winner": winner,
+                "ordinal": ordinal,
+            }
+
+        map_total = max(len(planned_maps), max(parsed_maps, default=0))
+        maps = []
+        for ordinal in range(1, map_total + 1):
+            if ordinal in parsed_maps:
+                maps.append(parsed_maps[ordinal])
+                continue
+            planned = planned_maps[ordinal - 1] if ordinal <= len(planned_maps) else {}
             maps.append(
                 {
-                    "map": name,
-                    "s1": str(s1) if isinstance(s1, int) else "-",
-                    "s2": str(s2) if isinstance(s2, int) else "-",
-                    "played": True,
-                    "finished": finished,
-                    "winner": winner,
+                    **planned,
+                    "map": str(planned.get("map") or f"Map {ordinal}"),
+                    "s1": "-",
+                    "s2": "-",
+                    "played": False,
+                    "finished": False,
+                    "winner": 0,
                     "ordinal": ordinal,
                 }
             )
@@ -1081,14 +1142,19 @@ class HltvClient:
             won1 = sum(item["winner"] == 1 for item in maps if item["finished"])
             won2 = sum(item["winner"] == 2 for item in maps if item["finished"])
 
-        current = maps[-1] if maps and not maps[-1]["finished"] else None
+        played_maps = [item for item in maps if item.get("played")]
+        current = (
+            played_maps[-1]
+            if played_maps and not played_maps[-1]["finished"]
+            else None
+        )
         current_name = str(current.get("map") or "") if current else ""
         current_score = (
             f"{current['s1']}:{current['s2']}"
             if current and current["s1"].isdigit() and current["s2"].isdigit()
             else ""
         )
-        active_index = maps[-1]["ordinal"] if maps else 0
+        active_index = played_maps[-1]["ordinal"] if played_maps else 0
         summary = {
             "maps_score": (
                 f"{won1}:{won2}"
@@ -1108,6 +1174,9 @@ class HltvClient:
             "score_source": "scorebot",
         }
         live = cls._summarize_scoreboard(score.get("_scoreboard"), config)
+        live_stats = cls._scoreboard_player_stats(score.get("_scoreboard"), config)
+        if live_stats:
+            summary["live_stats"] = live_stats
         if not live:
             return summary
 
@@ -1129,10 +1198,22 @@ class HltvClient:
         )
         if current_item is not None:
             live_index = int(current_item.get("ordinal") or live_index or 1)
+            current_item["played"] = True
+            live_score = str(live.get("current_score") or "")
+            if ":" in live_score:
+                current_item["s1"], current_item["s2"] = live_score.split(":", 1)
         elif not live_index:
             live_index = (
-                max((int(item.get("ordinal") or 0) for item in maps), default=0) + 1
-                if maps
+                max(
+                    (
+                        int(item.get("ordinal") or 0)
+                        for item in maps
+                        if item.get("played")
+                    ),
+                    default=0,
+                )
+                + 1
+                if played_maps
                 else 1
             )
         summary.update(

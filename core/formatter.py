@@ -176,6 +176,44 @@ def format_live(
     return "\n".join(lines)
 
 
+def format_live_detail(snapshot: dict) -> str:
+    lines = [format_live([snapshot])]
+    maps = list(snapshot.get("maps") or [])
+    active_index = int(snapshot.get("active_map_index") or 0)
+    if maps:
+        lines.extend(["━━━━━━━━━━━━━━━━━━━━", "地图"])
+        for position, item in enumerate(maps, start=1):
+            index = int(item.get("ordinal") or position)
+            name = str(item.get("map") or f"Map {index}")
+            s1, s2 = str(item.get("s1") or ""), str(item.get("s2") or "")
+            score = f" {s1}:{s2}" if s1.isdigit() and s2.isdigit() else ""
+            if item.get("finished"):
+                status = "已结束"
+            elif item.get("played") or index == active_index:
+                status = "进行中"
+            else:
+                status = "未开始"
+            lines.append(f"MAP {index}  {name}{score}  {status}")
+
+    stats = list(snapshot.get("live_stats") or [])[:2]
+    lines.extend(["━━━━━━━━━━━━━━━━━━━━", "当前地图十人实时战绩"])
+    if not stats:
+        lines.append("实时选手数据暂未同步。")
+    team_names = (
+        str(snapshot.get("team1") or "队伍 1"),
+        str(snapshot.get("team2") or "队伍 2"),
+    )
+    for index, team in enumerate(stats):
+        lines.append(team_names[index] if index < 2 else str(team.get("team") or "?"))
+        for player in team.get("players") or []:
+            lines.append(
+                f"  {player.get('nickname') or '?'}  K-D {player.get('kd') or '-'}  "
+                f"+/- {player.get('diff') or '-'}  A {player.get('assists') or '-'}  "
+                f"ADR {player.get('adr') or '-'}  KAST {player.get('kast') or '-'}"
+            )
+    return "\n".join(lines)
+
+
 def format_map_started(snapshot: dict) -> str:
     team1 = str(snapshot.get("team1") or "?")
     team2 = str(snapshot.get("team2") or "?")
@@ -482,9 +520,9 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv today — 今日赛程（大赛）
 /hltv matches [天数] — 近期大赛
 /live 或 /hltv live — 只查看正在进行的比赛，不自动订阅
-/live 1 2 3 — 按卡片序号批量订阅比赛
-/live <队名> — 查看指定战队，未开赛时订阅今日比赛
-/live 取消 — 取消你的直播提醒
+/hltv live 1 2 3 — 按卡片序号批量订阅比赛
+/hltv live <队名> — 查看当前图十人实时战绩与选图，并订阅比赛
+/hltv live 取消 — 取消你的直播提醒
 /hltv results [天数] — 近期赛果
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名

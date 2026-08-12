@@ -37,6 +37,7 @@ from .core.client import (
 from .core.renderer import (
     render_events_card,
     render_live_card,
+    render_live_detail_card,
     render_matches_card,
     render_news_card,
     render_player_card,
@@ -250,13 +251,25 @@ class HltvPlugin(Star):
         return items[: self.max_items] if self.max_items > 0 else items
 
     async def _fetch_live_scores(
-        self, matches: list[dict], limit: int
+        self, matches: list[dict], limit: int, *, detailed: bool = False
     ) -> tuple[list[tuple[dict, dict]], int]:
         scored = []
         failures = 0
         for match in matches[:limit]:
             try:
-                snapshot = await self.client.get_live_snapshot(match)
+                if detailed and callable(getattr(self.client, "get_match_snapshot", None)):
+                    try:
+                        snapshot = await self.client.get_match_snapshot(
+                            match.get("id"), match.get("url", ""), watch=True
+                        )
+                    except HltvError as e:
+                        logger.warning(
+                            f"[hltv] 获取单场详情失败({match.get('id')})，"
+                            f"回退直播快照: {e}"
+                        )
+                        snapshot = await self.client.get_live_snapshot(match)
+                else:
+                    snapshot = await self.client.get_live_snapshot(match)
             except HltvError as e:
                 failures += 1
                 logger.warning(f"[hltv] 获取比分失败({match.get('id')}): {e}")
@@ -300,8 +313,12 @@ class HltvPlugin(Star):
         event: AstrMessageEvent,
         matches: list[dict],
         limit: int,
+        *,
+        detailed: bool = False,
     ) -> tuple[int, int, int]:
-        scored, failures = await self._fetch_live_scores(matches, limit)
+        scored, failures = await self._fetch_live_scores(
+            matches, limit, detailed=detailed
+        )
         watched = already_watching = 0
         sender_id = self._sender_id(event)
         sender_name = self._sender_name(event)
@@ -513,10 +530,10 @@ class HltvPlugin(Star):
                 yield event.plain_result(str(e))
                 return
             watched, already_watching, subscription_failures = (
-                await self._subscribe_live_matches(event, mine, 2)
+                await self._subscribe_live_matches(event, mine, 2, detailed=True)
             )
             if mine:
-                text = formatter.format_live(mine)
+                text = formatter.format_live_detail(mine[0])
                 footer = ""
                 if watched:
                     footer = (
@@ -537,11 +554,11 @@ class HltvPlugin(Star):
                     text += f"\n\n{footer}"
                 yield await self._image_or_text(
                     event,
-                    render_live_card,
+                    render_live_detail_card,
                     text,
-                    mine,
+                    mine[0],
                     footer=footer,
-                    log_name="直播卡片",
+                    log_name="单场直播详情卡片",
                 )
             else:
                 text = formatter.format_team_not_live(name, upcoming)
@@ -594,8 +611,8 @@ class HltvPlugin(Star):
             )
             if self._sender_id(event):
                 yield event.plain_result(
-                    "订阅直播：发送 /live 1 2 3\n"
-                    "数字对应图片中的比赛序号，可多选。"
+                    "想订阅比赛：发送 /hltv live 1 2 3（数字对应卡片序号，可多选）\n"
+                    "想看某场实时战绩或订阅指定战队：发送 /hltv live 战队名"
                 )
         else:
             yield await self._image_or_text(

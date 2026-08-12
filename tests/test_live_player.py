@@ -39,11 +39,13 @@ from core.renderer import (
     CARD_SIZE,
     PLAYER_CARD_SIZE,
     RATING_CARD_SIZE,
+    LIVE_DETAIL_CARD_SIZE,
     TOP20_CARD_SIZE,
     WIDE_BACKGROUND,
     _pick_background,
     render_events_card,
     render_live_card,
+    render_live_detail_card,
     render_matches_card,
     render_news_card,
     render_player_card,
@@ -1111,6 +1113,72 @@ class MatchSnapshotTests(unittest.TestCase):
 
 
 class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    def test_scoreboard_player_stats_follow_team_ids_across_sides(self):
+        stats = HltvClient._scoreboard_player_stats(
+            {
+                "live": True,
+                "ctTeamId": 20,
+                "tTeamId": 10,
+                "ctTeamScore": 10,
+                "tTeamScore": 9,
+                "TERRORIST": [
+                    {
+                        "nick": "donk",
+                        "score": 20,
+                        "deaths": 13,
+                        "assists": 3,
+                        "damagePrRound": 93.55,
+                        "advancedStats": {"kast": 15},
+                    }
+                ],
+                "CT": [
+                    {
+                        "name": "sinnopsyy",
+                        "score": 15,
+                        "deaths": 13,
+                        "assists": 5,
+                        "damagePrRound": 99.75,
+                        "advancedStats": {"kast": 15},
+                    }
+                ],
+            },
+            {"team1_id": "10", "team2_id": "20"},
+        )
+
+        self.assertEqual([team["team_id"] for team in stats], ["10", "20"])
+        self.assertEqual(
+            stats[0]["players"][0],
+            {
+                "nickname": "donk",
+                "kd": "20-13",
+                "diff": "+7",
+                "assists": "3",
+                "adr": "93.5",
+                "kast": "78.9%",
+            },
+        )
+        self.assertEqual(stats[1]["players"][0]["nickname"], "sinnopsyy")
+
+    def test_scorebot_keeps_unstarted_planned_maps(self):
+        summary = HltvClient.summarize_scorebot(
+            {
+                "wins": {"10": 0, "20": 0},
+                "mapScores": {
+                    "1": {
+                        "mapOrdinal": 1,
+                        "map": "de_mirage",
+                        "mapOver": False,
+                        "scores": {"10": 9, "20": 10},
+                    }
+                },
+            },
+            {"team1_id": "10", "team2_id": "20"},
+            [{"map": "Mirage"}, {"map": "Nuke"}, {"map": "Ancient"}],
+        )
+
+        self.assertEqual([item["map"] for item in summary["maps"]], ["Mirage", "Nuke", "Ancient"])
+        self.assertEqual([item["played"] for item in summary["maps"]], [True, False, False])
+
     def test_matches_parser_keeps_live_scorebot_team_ids(self):
         page = BeautifulSoup(
             """
@@ -1926,6 +1994,52 @@ class TeamTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RendererTests(unittest.TestCase):
+    def test_live_detail_card_shows_three_maps_and_ten_players(self):
+        def players(prefix):
+            return [
+                {
+                    "nickname": f"{prefix}_player_{index}",
+                    "kd": f"{20 - index}-{12 + index}",
+                    "diff": f"{8 - index * 2:+d}",
+                    "assists": str(index + 1),
+                    "adr": f"{95 - index * 6:.1f}",
+                    "kast": f"{80 - index * 2:.1f}%",
+                }
+                for index in range(5)
+            ]
+
+        snapshot = {
+            "id": "2396559",
+            "team1": "Spirit",
+            "team2": "JiJieHao International",
+            "event": "Esports World Cup 2026",
+            "best_of": "BO3",
+            "maps_score": "0:0",
+            "current_map_name": "Mirage",
+            "current_score": "9:10",
+            "active_map_index": 1,
+            "maps": [
+                {"map": "Mirage", "s1": "9", "s2": "10", "played": True, "finished": False, "ordinal": 1},
+                {"map": "Nuke", "s1": "-", "s2": "-", "played": False, "finished": False, "ordinal": 2},
+                {"map": "Ancient", "s1": "-", "s2": "-", "played": False, "finished": False, "ordinal": 3},
+            ],
+            "live_stats": [
+                {"team_id": "10", "players": players("spirit")},
+                {"team_id": "20", "players": players("jijiehao")},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = render_live_detail_card(
+                snapshot,
+                background_path=WIDE_BACKGROUND,
+                output_dir=Path(temp),
+            )
+            with Image.open(path) as image:
+                self.assertEqual(image.size, LIVE_DETAIL_CARD_SIZE)
+                flat = Image.new("RGB", image.size, image.getpixel((0, 0)))
+                self.assertIsNotNone(ImageChops.difference(image, flat).getbbox())
+
     def test_all_four_user_backgrounds_are_randomized(self):
         self.assertEqual(len(BACKGROUND_POOL), 4)
         self.assertTrue(all(path.is_file() for path in BACKGROUND_POOL))

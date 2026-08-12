@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from .formatter import news_titles
 
@@ -31,6 +31,7 @@ CARD_SIZE = (1600, 1000)
 PLAYER_CARD_SIZE = (1600, 1400)
 TOP20_CARD_SIZE = (1600, 1600)
 RATING_CARD_SIZE = (1600, 1000)
+LIVE_DETAIL_CARD_SIZE = (1600, 1000)
 
 INK = (247, 244, 245, 255)
 MUTED = (196, 187, 191, 255)
@@ -691,6 +692,151 @@ def render_live_card(
         draw.line((72, 930, 1528, 930), fill=LINE, width=2)
         draw.text((72, 950), _ellipsize(draw, footer, _font(22, True), 1456), font=_font(22, True), fill=ACCENT)
     return _save(canvas, output_dir, "live_center.png")
+
+
+def render_live_detail_card(
+    snapshot: dict,
+    *,
+    footer: str = "",
+    background_path: Path | None = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    selected_background = _pick_background(background_path)
+    if not selected_background.is_file():
+        raise RenderError(f"Card background does not exist: {selected_background}")
+    with Image.open(selected_background) as source:
+        background = ImageOps.fit(
+            source.convert("RGB"),
+            LIVE_DETAIL_CARD_SIZE,
+            Image.Resampling.LANCZOS,
+            centering=(0.5, 0.4),
+        )
+    background = ImageEnhance.Color(background).enhance(0.34)
+    background = ImageEnhance.Contrast(background).enhance(0.82)
+    background = background.filter(ImageFilter.GaussianBlur(1.2)).convert("RGBA")
+    canvas = Image.alpha_composite(
+        background,
+        Image.new("RGBA", LIVE_DETAIL_CARD_SIZE, (229, 231, 234, 204)),
+    )
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    team1 = str(snapshot.get("team1") or "?")
+    team2 = str(snapshot.get("team2") or "?")
+    map_name = str(snapshot.get("current_map_name") or "当前地图")
+    current = str(snapshot.get("current_score") or "?:?")
+    series = str(snapshot.get("maps_score") or "?:?")
+    best_of = str(snapshot.get("best_of") or "").upper()
+
+    draw.text((30, 18), f"LIVE MATCH  /  {map_name}", font=_font(33, True), fill=RATING_INK)
+    event = _ellipsize(draw, snapshot.get("event") or "赛事信息暂缺", _font(21), 620)
+    bounds = draw.textbbox((0, 0), event, font=_font(21))
+    draw.text((1570 - bounds[2], 27), event, font=_font(21), fill=RATING_MUTED)
+
+    score_line = f"{team1}   {current}   {team2}"
+    score_font = _fit_font(draw, score_line, 36, 1120, bold=True, minimum=25)
+    draw.text((30, 67), score_line, font=score_font, fill=RATING_BLUE)
+    series_line = f"{best_of + '  ' if best_of else ''}大局 {series}"
+    series_bounds = draw.textbbox((0, 0), series_line, font=_font(23, True))
+    draw.text((1570 - series_bounds[2], 78), series_line, font=_font(23, True), fill=RATING_INK)
+    draw.line((28, 116, 1572, 116), fill=RATING_LINE, width=2)
+
+    maps = list(snapshot.get("maps") or [])
+    if maps:
+        shown_maps = maps[:5]
+        gap = 12
+        width = (1544 - gap * (len(shown_maps) - 1)) // len(shown_maps)
+        active_index = int(snapshot.get("active_map_index") or 0)
+        for position, item in enumerate(shown_maps, start=1):
+            index = int(item.get("ordinal") or position)
+            left = 28 + (width + gap) * (position - 1)
+            right = left + width
+            draw.rectangle((left, 134, right, 234), fill=RATING_PANEL, outline=RATING_LINE, width=1)
+            name = str(item.get("map") or f"Map {index}")
+            name_font = _fit_font(draw, f"MAP {index}  {name}", 21, width - 28, bold=True, minimum=16)
+            draw.text((left + 14, 149), _ellipsize(draw, f"MAP {index}  {name}", name_font, width - 28), font=name_font, fill=RATING_INK)
+            s1, s2 = str(item.get("s1") or ""), str(item.get("s2") or "")
+            score = f"{s1}:{s2}" if s1.isdigit() and s2.isdigit() else "-:-"
+            if item.get("finished"):
+                status, color = f"{score}  已结束", RATING_MUTED
+            elif item.get("played") or index == active_index:
+                status, color = f"{score}  进行中", RATING_BLUE
+            else:
+                status, color = "未开始", RATING_MUTED
+            draw.text((left + 14, 190), status, font=_font(20, True), fill=color)
+    else:
+        draw.text((30, 166), "地图信息暂未同步", font=_font(22, True), fill=RATING_MUTED)
+
+    stats = list(snapshot.get("live_stats") or [])[:2]
+    team_names = (team1, team2)
+    table_top = 264
+    table_width = 758
+    gap = 28
+    edges_local = (0, 292, 396, 478, 556, 646, 758)
+    headers = ("选手", "K-D", "+/-", "A", "ADR", "KAST")
+    for team_index in range(2):
+        left = 28 + team_index * (table_width + gap)
+        players = list(stats[team_index].get("players") or [])[:5] if team_index < len(stats) else []
+        draw.rectangle((left, table_top, left + table_width, table_top + 56), fill=(246, 247, 249, 255))
+        draw.rectangle((left + 14, table_top + 14, left + 20, table_top + 42), fill=RATING_BLUE)
+        team_name = team_names[team_index]
+        team_font = _fit_font(draw, team_name, 28, 255, bold=True, minimum=20)
+        draw.text((left + 32, table_top + 10), _ellipsize(draw, team_name, team_font, 255), font=team_font, fill=RATING_BLUE)
+        for column, label in enumerate(headers[1:], start=1):
+            _draw_centered(
+                draw,
+                (left + edges_local[column], table_top, left + edges_local[column + 1], table_top + 56),
+                label,
+                _font(20, True),
+                RATING_INK,
+            )
+        body_top = table_top + 56
+        row_height = 112
+        table_bottom = body_top + row_height * 5
+        for row_index in range(5):
+            top = body_top + row_index * row_height
+            bottom = top + row_height
+            draw.rectangle(
+                (left, top, left + table_width, bottom),
+                fill=RATING_ALT if row_index % 2 else RATING_PANEL,
+            )
+            draw.line((left, top, left + table_width, top), fill=RATING_LINE, width=1)
+            if row_index >= len(players):
+                continue
+            player = players[row_index]
+            name = str(player.get("nickname") or "?")
+            name_font = _fit_font(draw, name, 27, 258, bold=True, minimum=20)
+            draw.text((left + 18, top + 39), _ellipsize(draw, name, name_font, 258), font=name_font, fill=RATING_BLUE)
+            values = (
+                player.get("kd"),
+                player.get("diff"),
+                player.get("assists"),
+                player.get("adr"),
+                player.get("kast"),
+            )
+            for column, value in enumerate(values, start=1):
+                color = RATING_INK
+                if column == 2:
+                    color = _rating_metric_color(value, swing=True)
+                _draw_centered(
+                    draw,
+                    (left + edges_local[column], top, left + edges_local[column + 1], bottom),
+                    value,
+                    _font(22, column == 1),
+                    color,
+                )
+        for boundary in edges_local[1:-1]:
+            draw.line((left + boundary, table_top, left + boundary, table_bottom), fill=RATING_LINE, width=1)
+        draw.rectangle((left, table_top, left + table_width, table_bottom), outline=RATING_LINE, width=1)
+
+    if not stats:
+        message = "当前地图十人实时数据暂未同步"
+        bounds = draw.textbbox((0, 0), message, font=_font(26, True))
+        draw.rectangle((28, 320, 1572, 790), fill=(250, 250, 251, 220))
+        draw.text(((1600 - bounds[2]) // 2, 535), message, font=_font(26, True), fill=RATING_MUTED)
+    draw.line((28, 934, 1572, 934), fill=RATING_LINE, width=2)
+    footer_text = footer or "数据来自 HLTV scorebot，随比赛进程实时更新"
+    draw.text((30, 953), _ellipsize(draw, footer_text, _font(20), 1540), font=_font(20), fill=RATING_MUTED)
+    identity = snapshot.get("id") or f"{team1}_{team2}"
+    return _save(canvas, output_dir, f"live_detail_{_safe_name(identity)}.png")
 
 
 def render_rating_card(
