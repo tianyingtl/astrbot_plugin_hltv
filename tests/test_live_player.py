@@ -2235,11 +2235,56 @@ class RendererTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as temp:
-            path = render_rating_card(snapshot, output_dir=Path(temp))
+            path = render_rating_card(
+                snapshot,
+                background_path=WIDE_BACKGROUND,
+                output_dir=Path(temp),
+            )
             with Image.open(path) as image:
                 self.assertEqual(image.size, RATING_CARD_SIZE)
                 flat = Image.new("RGB", image.size, image.getpixel((0, 0)))
                 self.assertIsNotNone(ImageChops.difference(image, flat).getbbox())
+
+    def test_rating_table_keeps_random_background_visible(self):
+        players = [
+            {
+                "nickname": f"player{index}",
+                "kd": "10-8",
+                "swing": "+2.00%",
+                "adr": "82.5",
+                "kast": "75.0%",
+                "rating": "1.15",
+            }
+            for index in range(5)
+        ]
+        snapshot = {
+            "id": "transparent-rating",
+            "team1": "A",
+            "team2": "B",
+            "maps_score": "1:0",
+            "ratings": [
+                {"team": "A", "players": players},
+                {"team": "B", "players": players},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            red = root / "red.png"
+            blue = root / "blue.png"
+            Image.new("RGB", RATING_CARD_SIZE, (220, 40, 40)).save(red)
+            Image.new("RGB", RATING_CARD_SIZE, (40, 40, 220)).save(blue)
+            red_card = render_rating_card(
+                snapshot, background_path=red, output_dir=root / "red"
+            )
+            blue_card = render_rating_card(
+                snapshot, background_path=blue, output_dir=root / "blue"
+            )
+
+            with Image.open(red_card) as red_image, Image.open(blue_card) as blue_image:
+                self.assertNotEqual(
+                    red_image.convert("RGB").getpixel((300, 250)),
+                    blue_image.convert("RGB").getpixel((300, 250)),
+                )
 
     def test_list_cards_are_nonblank(self):
         matches = [

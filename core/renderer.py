@@ -865,6 +865,7 @@ def render_rating_card(
     snapshot: dict,
     *,
     map_rating: dict | None = None,
+    background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
     detail = map_rating or snapshot
@@ -872,7 +873,23 @@ def render_rating_card(
     if not teams:
         raise RenderError("No Rating data available for table rendering.")
 
-    canvas = Image.new("RGBA", RATING_CARD_SIZE, RATING_BG)
+    selected_background = _pick_background(background_path)
+    if not selected_background.is_file():
+        raise RenderError(f"Card background does not exist: {selected_background}")
+    with Image.open(selected_background) as source:
+        background = ImageOps.fit(
+            source.convert("RGB"),
+            RATING_CARD_SIZE,
+            Image.Resampling.LANCZOS,
+            centering=(0.5, 0.4),
+        )
+    background = ImageEnhance.Color(background).enhance(0.42)
+    background = ImageEnhance.Contrast(background).enhance(0.96)
+    background = background.filter(ImageFilter.GaussianBlur(0.5)).convert("RGBA")
+    canvas = Image.alpha_composite(
+        background,
+        Image.new("RGBA", RATING_CARD_SIZE, (229, 231, 234, 128)),
+    )
     draw = ImageDraw.Draw(canvas, "RGBA")
     team1 = str(snapshot.get("team1") or teams[0].get("team") or "?")
     team2 = str(
@@ -908,8 +925,11 @@ def render_rating_card(
         team_name = str(team.get("team") or (team1 if team_index == 0 else team2))
         players = list(team.get("players") or [])[:row_slots]
         table_bottom = y + header_height + row_height * row_slots
-        draw.rectangle((edges[0], y, edges[-1], table_bottom), fill=RATING_PANEL)
-        draw.rectangle((edges[0], y, edges[-1], y + header_height), fill=(246, 247, 249, 255))
+        _alpha_rectangle(
+            canvas,
+            (edges[0], y, edges[-1], y + header_height),
+            (240, 243, 246, 165),
+        )
         draw.rectangle((44, y + 15, 50, y + 43), fill=RATING_BLUE)
         team_font = _fit_font(draw, team_name, 32, 750, bold=True, minimum=24)
         draw.text((66, y + 11), _ellipsize(draw, team_name, team_font, 750), font=team_font, fill=RATING_BLUE)
@@ -925,8 +945,13 @@ def render_rating_card(
         for row_index in range(row_slots):
             top = y + header_height + row_index * row_height
             bottom = top + row_height
-            if row_index % 2:
-                draw.rectangle((edges[0], top, edges[-1], bottom), fill=RATING_ALT)
+            _alpha_rectangle(
+                canvas,
+                (edges[0], top, edges[-1], bottom),
+                (219, 225, 231, 112)
+                if row_index % 2
+                else (250, 250, 251, 122),
+            )
             draw.line((edges[0], top, edges[-1], top), fill=RATING_LINE, width=1)
             if row_index >= len(players):
                 continue
