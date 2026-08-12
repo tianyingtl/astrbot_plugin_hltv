@@ -303,6 +303,16 @@ def _draw_centered(
     draw.text((x, y), value, font=font, fill=fill)
 
 
+def _alpha_rectangle(
+    canvas: Image.Image,
+    box: tuple[int, int, int, int],
+    fill: tuple[int, int, int, int],
+) -> None:
+    left, top, right, bottom = box
+    overlay = Image.new("RGBA", (right - left + 1, bottom - top + 1), fill)
+    canvas.alpha_composite(overlay, (left, top))
+
+
 def _rating_metric_color(value: Any, *, swing: bool = False):
     try:
         number = float(str(value).replace("%", "").replace("+", "").strip())
@@ -711,12 +721,12 @@ def render_live_detail_card(
             Image.Resampling.LANCZOS,
             centering=(0.5, 0.4),
         )
-    background = ImageEnhance.Color(background).enhance(0.34)
-    background = ImageEnhance.Contrast(background).enhance(0.82)
-    background = background.filter(ImageFilter.GaussianBlur(1.2)).convert("RGBA")
+    background = ImageEnhance.Color(background).enhance(0.42)
+    background = ImageEnhance.Contrast(background).enhance(0.96)
+    background = background.filter(ImageFilter.GaussianBlur(0.5)).convert("RGBA")
     canvas = Image.alpha_composite(
         background,
-        Image.new("RGBA", LIVE_DETAIL_CARD_SIZE, (229, 231, 234, 204)),
+        Image.new("RGBA", LIVE_DETAIL_CARD_SIZE, (229, 231, 234, 128)),
     )
     draw = ImageDraw.Draw(canvas, "RGBA")
     team1 = str(snapshot.get("team1") or "?")
@@ -749,7 +759,12 @@ def render_live_detail_card(
             index = int(item.get("ordinal") or position)
             left = 28 + (width + gap) * (position - 1)
             right = left + width
-            draw.rectangle((left, 134, right, 234), fill=RATING_PANEL, outline=RATING_LINE, width=1)
+            _alpha_rectangle(
+                canvas, (left, 134, right, 234), (248, 249, 250, 145)
+            )
+            draw.rectangle(
+                (left, 134, right, 234), outline=RATING_LINE, width=1
+            )
             name = str(item.get("map") or f"Map {index}")
             name_font = _fit_font(draw, f"MAP {index}  {name}", 21, width - 28, bold=True, minimum=16)
             draw.text((left + 14, 149), _ellipsize(draw, f"MAP {index}  {name}", name_font, width - 28), font=name_font, fill=RATING_INK)
@@ -775,7 +790,11 @@ def render_live_detail_card(
     for team_index in range(2):
         left = 28 + team_index * (table_width + gap)
         players = list(stats[team_index].get("players") or [])[:5] if team_index < len(stats) else []
-        draw.rectangle((left, table_top, left + table_width, table_top + 56), fill=(246, 247, 249, 255))
+        _alpha_rectangle(
+            canvas,
+            (left, table_top, left + table_width, table_top + 56),
+            (240, 243, 246, 165),
+        )
         draw.rectangle((left + 14, table_top + 14, left + 20, table_top + 42), fill=RATING_BLUE)
         team_name = team_names[team_index]
         team_font = _fit_font(draw, team_name, 28, 255, bold=True, minimum=20)
@@ -794,9 +813,12 @@ def render_live_detail_card(
         for row_index in range(5):
             top = body_top + row_index * row_height
             bottom = top + row_height
-            draw.rectangle(
+            _alpha_rectangle(
+                canvas,
                 (left, top, left + table_width, bottom),
-                fill=RATING_ALT if row_index % 2 else RATING_PANEL,
+                (219, 225, 231, 112)
+                if row_index % 2
+                else (250, 250, 251, 122),
             )
             draw.line((left, top, left + table_width, top), fill=RATING_LINE, width=1)
             if row_index >= len(players):
@@ -830,7 +852,7 @@ def render_live_detail_card(
     if not stats:
         message = "当前地图十人实时数据暂未同步"
         bounds = draw.textbbox((0, 0), message, font=_font(26, True))
-        draw.rectangle((28, 320, 1572, 790), fill=(250, 250, 251, 220))
+        _alpha_rectangle(canvas, (28, 320, 1572, 790), (250, 250, 251, 145))
         draw.text(((1600 - bounds[2]) // 2, 535), message, font=_font(26, True), fill=RATING_MUTED)
     draw.line((28, 934, 1572, 934), fill=RATING_LINE, width=2)
     footer_text = footer or "数据来自 HLTV scorebot，随比赛进程实时更新"

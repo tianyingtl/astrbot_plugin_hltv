@@ -2095,6 +2095,50 @@ class RendererTests(unittest.TestCase):
                 flat = Image.new("RGB", image.size, image.getpixel((0, 0)))
                 self.assertIsNotNone(ImageChops.difference(image, flat).getbbox())
 
+    def test_live_detail_table_keeps_background_visible(self):
+        snapshot = {
+            "id": "transparent-table",
+            "team1": "A",
+            "team2": "B",
+            "current_map_name": "Nuke",
+            "current_score": "3:1",
+            "maps_score": "0:0",
+            "best_of": "BO1",
+            "active_map_index": 1,
+            "maps": [
+                {
+                    "map": "Nuke",
+                    "s1": "3",
+                    "s2": "1",
+                    "played": True,
+                    "finished": False,
+                    "ordinal": 1,
+                }
+            ],
+            "live_stats": [
+                {"players": [{"nickname": "alpha", "kd": "3-1"}]},
+                {"players": [{"nickname": "bravo", "kd": "1-3"}]},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            red = root / "red.png"
+            blue = root / "blue.png"
+            Image.new("RGB", LIVE_DETAIL_CARD_SIZE, (220, 40, 40)).save(red)
+            Image.new("RGB", LIVE_DETAIL_CARD_SIZE, (40, 40, 220)).save(blue)
+            red_card = render_live_detail_card(
+                snapshot, background_path=red, output_dir=root / "red"
+            )
+            blue_card = render_live_detail_card(
+                snapshot, background_path=blue, output_dir=root / "blue"
+            )
+
+            with Image.open(red_card) as red_image, Image.open(blue_card) as blue_image:
+                self.assertNotEqual(
+                    red_image.convert("RGB").getpixel((300, 400)),
+                    blue_image.convert("RGB").getpixel((300, 400)),
+                )
+
     def test_all_four_user_backgrounds_are_randomized(self):
         self.assertEqual(len(BACKGROUND_POOL), 4)
         self.assertTrue(all(path.is_file() for path in BACKGROUND_POOL))
