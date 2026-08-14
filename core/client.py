@@ -2440,6 +2440,49 @@ class HltvClient:
             return Path(image_path)
         raise HltvError(f"HLTV {year} 年 TOP20 官方总图当前不可用。")
 
+    async def get_top20_players(self, year: int) -> list[dict]:
+        """只抓取年度名单文本数据，不下载榜单海报。"""
+        async def fetch() -> list[dict]:
+            if Hltv is None:
+                raise HltvError(
+                    "依赖 hltv-async-api 未安装。请在 WebUI 插件管理中安装依赖后重载插件。"
+                )
+            try:
+                async with Hltv(**self._hltv_opts) as hltv:
+                    fetcher = getattr(hltv, "_fetch", None)
+                    if fetcher is None:
+                        raise HltvError(
+                            "hltv-async-api 版本不兼容（缺少 _fetch），请安装 0.8.x 版本。"
+                        )
+                    january = await fetcher(
+                        f"https://www.hltv.org/news/archive/{year + 1}/january"
+                    )
+                    players = self._parse_top20_players([january], year)
+                    if len(players) < 20:
+                        december = await fetcher(
+                            f"https://www.hltv.org/news/archive/{year}/december"
+                        )
+                        players = self._parse_top20_players(
+                            [january, december], year
+                        )
+                    if len(players) != 20:
+                        raise HltvError(
+                            f"没有找到完整的 HLTV {year} 年 TOP20 榜单。"
+                        )
+                    return players
+            except HltvError:
+                raise
+            except Exception as e:
+                logger.error(f"[hltv] 获取 {year} 年 TOP20 文本榜单失败: {e!r}")
+                raise HltvError(
+                    "请求 HLTV 失败，可能是网络问题或触发了 Cloudflare 风控，"
+                    "可稍后重试或在插件配置中设置代理。"
+                ) from e
+
+        return await self._cached_locked(
+            f"top20:players:{year}", fetch, ttl=86400
+        )
+
     async def get_top20_player(self, year: int, rank: int) -> dict:
         if not 1 <= rank <= 20:
             raise HltvError("TOP20 名次范围为 1-20。")

@@ -48,6 +48,14 @@ def _load_main_module():
         def event_message_type(*_args, **_kwargs):
             return lambda function: function
 
+        @staticmethod
+        def llm_tool(name=None, **_kwargs):
+            def decorate(function):
+                function.llm_tool_name = name or function.__name__
+                return function
+
+            return decorate
+
     class Star:
         def __init__(self, context):
             self.context = context
@@ -124,6 +132,151 @@ class Top20MessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([kind for kind, _value in results[0]], ["text", "image"])
         self.assertIn("Top 20 players of 2025", results[0][0][1])
         self.assertEqual(results[0][1], ("image", "official.jpg"))
+
+
+class HltvKnowledgeToolTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _plugin(module, client):
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = client
+        plugin.max_items = 10
+        plugin.default_days = 1
+        return plugin
+
+    def test_tool_is_registered_with_two_documented_arguments(self):
+        module = _load_main_module()
+
+        self.assertEqual(module.HltvPlugin.query_hltv.llm_tool_name, "query_hltv")
+        doc = module.HltvPlugin.query_hltv.__doc__ or ""
+        self.assertIn("category(string)", doc)
+        self.assertIn("query(string)", doc)
+        self.assertIn("必须优先调用本工具", doc)
+
+    async def test_live_query_uses_fresh_snapshot_and_plain_text(self):
+        module = _load_main_module()
+
+        class Client:
+            async def get_live_matches(self):
+                return [
+                    {
+                        "id": 1,
+                        "url": "https://www.hltv.org/matches/1/test",
+                        "team1": "Natus Vincere",
+                        "team2": "Vitality",
+                        "event": "IEM Test",
+                        "best_of": "BO3",
+                    }
+                ]
+
+            async def get_live_snapshot(self, _match):
+                return {
+                    "maps_score": "1:0",
+                    "current_map_name": "Nuke",
+                    "current_score": "8:4",
+                }
+
+        text = await self._plugin(module, Client()).query_hltv("live", "NAVI")
+
+        self.assertIn("小局  Nuke   Natus Vincere 8:4 Vitality", text)
+        self.assertIn("大局  BO3  Natus Vincere 1:0 Vitality", text)
+
+    async def test_text_tool_routes_all_reference_categories(self):
+        module = _load_main_module()
+
+        class Client:
+            @staticmethod
+            def latest_top20_year():
+                return 2025
+
+            async def get_matches(self, days=1):
+                self.schedule_days = days
+                return [
+                    {
+                        "date": "15-08-2026",
+                        "time": "18:00",
+                        "team1": "Natus Vincere",
+                        "team2": "Vitality",
+                        "event": "IEM Test",
+                    },
+                    {
+                        "date": "15-08-2026",
+                        "time": "20:00",
+                        "team1": "Spirit",
+                        "team2": "Liquid",
+                        "event": "Other Event",
+                    },
+                ]
+
+            async def get_results(self, days=1):
+                self.result_days = days
+                return [
+                    {
+                        "date": "14-08-2026",
+                        "team1": "Natus Vincere",
+                        "team2": "Vitality",
+                        "score1": 2,
+                        "score2": 1,
+                        "event": "IEM Test",
+                    }
+                ]
+
+            async def get_top_teams(self, _limit):
+                return [{"rank": 1, "title": "Vitality", "points": 1000}]
+
+            async def get_events(self):
+                return [
+                    {"title": "IEM Test", "start_date": "15-08", "end_date": "20-08"},
+                    {"title": "BLAST Test", "start_date": "21-08", "end_date": "23-08"},
+                ]
+
+            async def find_team(self, name):
+                return {"title": name, "world_rank": 1, "players": []}
+
+            async def find_player(self, nickname):
+                return {"nickname": nickname, "name": "Test Player", "team": "Test Team"}
+
+            async def get_news(self):
+                return [{"title": "NAVI win IEM Test", "url": "https://www.hltv.org/news/1/test"}]
+
+            async def get_news_detail(self, _url):
+                return {"title": "NAVI win IEM Test", "paragraphs": ["Match report."]}
+
+            async def get_top20_players(self, year):
+                return [{"rank": rank, "name": f"Player {rank}"} for rank in range(1, 21)]
+
+            async def get_top20_player(self, year, rank):
+                return {
+                    "title": f"Top 20 players of {year}: NiKo ({rank})",
+                    "description": "Season summary.",
+                    "url": "https://www.hltv.org/news/1/top20",
+                }
+
+        client = Client()
+        plugin = self._plugin(module, client)
+
+        schedule = await plugin.query_hltv("schedule", "NAVI 7天")
+        results = await plugin.query_hltv("results", "NAVI 3天")
+        ranking = await plugin.query_hltv("ranking", "hltv")
+        events = await plugin.query_hltv("events", "IEM")
+        team = await plugin.query_hltv("team", "NAVI")
+        player = await plugin.query_hltv("player", "NiKo")
+        news = await plugin.query_hltv("news", "1")
+        top20 = await plugin.query_hltv("top20", "2025")
+        top20_player = await plugin.query_hltv("top20", "2025 18")
+
+        self.assertEqual(client.schedule_days, 7)
+        self.assertIn("Natus Vincere", schedule)
+        self.assertNotIn("Spirit", schedule)
+        self.assertEqual(client.result_days, 3)
+        self.assertIn("Natus Vincere 2 : 1 Vitality", results)
+        self.assertIn("#1 Vitality", ranking)
+        self.assertIn("IEM Test", events)
+        self.assertNotIn("BLAST Test", events)
+        self.assertIn("HLTV #1", team)
+        self.assertIn("NiKo", player)
+        self.assertIn("Match report.", news)
+        self.assertIn("#01  Player 1", top20)
+        self.assertIn("NiKo (18)", top20_player)
 
 
 class LiveCommandTests(unittest.IsolatedAsyncioTestCase):

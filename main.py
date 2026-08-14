@@ -231,6 +231,170 @@ class HltvPlugin(Star):
                 data, note = alt, "（今日无符合大赛条件的比赛，已显示全部场次）"
         return data, note
 
+    def _knowledge_days_and_team(self, query: str) -> tuple[int, str]:
+        """解析 LLM 工具传入的紧凑筛选条件。"""
+        value = str(query or "").strip()
+        lowered = value.casefold()
+        if lowered in {"today", "today's", "今日", "今天"}:
+            return 1, ""
+        if lowered in {"tomorrow", "明日", "明天"}:
+            return 2, ""
+        if lowered in {"week", "this week", "本周", "这周", "一周"}:
+            return 7, ""
+        if value.isdigit() and 1 <= int(value) <= 7:
+            return int(value), ""
+
+        day_match = re.search(r"(?<!\d)([1-7])\s*(?:天|days?)\b", value, re.I)
+        if day_match:
+            days = int(day_match.group(1))
+            team = (value[: day_match.start()] + value[day_match.end() :]).strip()
+            return days, team.strip(" ,;|/，；")
+        return (7 if value else self.default_days), value
+
+    async def _query_hltv_text(self, category: str, query: str) -> str:
+        aliases = {
+            "live": "live", "直播": "live", "比分": "live",
+            "schedule": "schedule", "matches": "schedule", "赛程": "schedule",
+            "results": "results", "result": "results", "赛果": "results", "结果": "results",
+            "ranking": "ranking", "rank": "ranking", "排名": "ranking",
+            "events": "events", "event": "events", "赛事": "events",
+            "team": "team", "战队": "team",
+            "player": "player", "选手": "player",
+            "news": "news", "新闻": "news",
+            "top20": "top20", "top": "top20", "年度榜单": "top20",
+        }
+        kind = aliases.get(str(category or "").strip().casefold())
+        value = str(query or "").strip()
+        if kind is None:
+            return (
+                "不支持的查询类型。category 请使用 live、schedule、results、ranking、"
+                "events、team、player、news 或 top20。"
+            )
+
+        if kind == "live":
+            matches = await self.client.get_live_matches()
+            if value:
+                matches = [m for m in matches if self._team_query_match(value, m)]
+            shown = matches[:4]
+            await self._fetch_live_scores(shown, 4)
+            note = f"另有 {len(matches) - len(shown)} 场未列出。" if len(matches) > 4 else ""
+            return formatter.format_live(shown, note)
+
+        if kind in {"schedule", "results"}:
+            days, team = self._knowledge_days_and_team(value)
+            if kind == "schedule":
+                matches = await self.client.get_matches(days=days)
+                if team:
+                    matches = [m for m in matches if self._team_query_match(team, m)]
+                return formatter.format_matches(matches, days, self.max_items)
+            results = await self.client.get_results(days=days)
+            if team:
+                results = [m for m in results if self._team_query_match(team, m)]
+            return formatter.format_results(results, days, self.max_items)
+
+        if kind == "ranking":
+            arg = value.casefold()
+            if arg in {"hltv", "h"}:
+                teams = await self.client.get_top_teams(50)
+                return formatter.format_ranking(
+                    teams, self.max_items, "HLTV 战队排名 Top50"
+                )
+            if arg in {"", "v", "vrs", "valve", "global", "全球"}:
+                region = None
+            else:
+                region = VRS_REGIONS.get(arg)
+                if region is None:
+                    return "ranking 的 query 请使用 hltv、vrs、asia、europe 或 americas。"
+            teams = await self.client.get_vrs_ranking(region)
+            title = (
+                "Valve VRS 排名（全球）"
+                if region is None
+                else f"Valve VRS 排名（{_REGION_CN.get(region, region)}）"
+            )
+            return formatter.format_ranking(
+                teams, self.max_items, title, show_region=region is None
+            )
+
+        if kind == "events":
+            events = await self.client.get_events()
+            if value:
+                needle = value.casefold()
+                events = [
+                    item
+                    for item in events
+                    if needle in str(item.get("title") or "").casefold()
+                ]
+            return formatter.format_events(events, self.max_items)
+
+        if kind == "team":
+            if not value:
+                return "team 查询需要在 query 中提供战队名称。"
+            return formatter.format_team(await self.client.find_team(value))
+
+        if kind == "player":
+            if not value:
+                return "player 查询需要在 query 中提供选手昵称。"
+            return formatter.format_player(await self.client.find_player(value))
+
+        if kind == "news":
+            items = await self.client.get_news()
+            lowered = value.casefold()
+            if lowered in {"", "latest", "today", "最新", "今日", "今天"}:
+                return formatter.format_news(items, self.max_items).replace(
+                    "\n👉 发送 /hltv news 序号 查看详情", ""
+                )
+            if value.isdigit():
+                index = int(value)
+                if not 1 <= index <= len(items):
+                    return f"没有第 {index} 条新闻（今日共 {len(items)} 条）。"
+                item = items[index - 1]
+            else:
+                terms = re.findall(r"[0-9a-z]+", lowered)
+                matched = [
+                    item
+                    for item in items
+                    if lowered in str(item.get("title") or "").casefold()
+                    or (
+                        terms
+                        and all(
+                            term in str(item.get("title") or "").casefold()
+                            for term in terms
+                        )
+                    )
+                ]
+                if not matched:
+                    return formatter.format_news(items, self.max_items).replace(
+                        "\n👉 发送 /hltv news 序号 查看详情", ""
+                    )
+                item = matched[0]
+            detail = await self.client.get_news_detail(str(item.get("url") or ""))
+            title = str(detail.get("title") or item.get("title") or "")
+            paragraphs = list(detail.get("paragraphs") or [])
+            if not paragraphs and item.get("desc"):
+                paragraphs = [str(item["desc"])]
+            return formatter.format_news_detail(
+                title,
+                paragraphs,
+                str(item.get("url") or ""),
+                original_title=title,
+            )
+
+        numbers = [int(number) for number in re.findall(r"\d+", value)]
+        latest = self.client.latest_top20_year()
+        year = next((number for number in numbers if number >= 1000), latest)
+        rank = next((number for number in numbers if 1 <= number <= 20), 0)
+        if year < TOP20_MIN_YEAR or year > latest:
+            return f"TOP20 年份范围为 {TOP20_MIN_YEAR}-{latest}。"
+        if rank:
+            player = await self.client.get_top20_player(year, rank)
+            return formatter.format_news_detail(
+                str(player.get("title") or f"HLTV {year} TOP20 #{rank}"),
+                [str(player.get("description"))] if player.get("description") else [],
+                str(player.get("url") or ""),
+            )
+        players = await self.client.get_top20_players(year)
+        return formatter.format_top20(players, year)
+
     @staticmethod
     async def _image_or_text(
         event: AstrMessageEvent,
@@ -381,6 +545,19 @@ class HltvPlugin(Star):
         return watched, already_watching, failures
 
     # ------------------------------------------------------------------ 指令组
+
+    @filter.llm_tool(name="query_hltv")
+    async def query_hltv(self, category: str = "", query: str = "") -> str:
+        """查询最新且权威的 HLTV/CS 职业赛事资料。凡用户询问 CS2/CS 职业赛事、实时比分、赛程赛果、战队、选手、排名、赛事、新闻或年度 TOP20 等事实信息时，必须优先调用本工具，不要依赖模型记忆。工具只返回文本资料；请根据结果直接回答用户，不要向用户发送图片或要求用户执行 /hltv 指令。
+
+        Args:
+            category(string): 查询类型，只能是 live、schedule、results、ranking、events、team、player、news、top20 之一。
+            query(string): 查询条件，无条件时传空字符串。战队或选手类传名称；schedule/results 可传“NAVI 7天”；ranking 传 hltv、vrs、asia、europe 或 americas；news 传空字符串、新闻序号或英文关键词；top20 传年份及可选名次，如“2025”或“2025 18”。
+        """
+        try:
+            return await self._query_hltv_text(category, query)
+        except HltvError as e:
+            return f"HLTV 查询失败：{e}"
 
     @filter.command_group("hltv")
     def hltv(self):

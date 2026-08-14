@@ -325,6 +325,30 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(players[0]["country"], "Sweden")
 
+    async def test_top20_text_query_reads_archives_without_downloading_poster(self):
+        january = self._archive(2023, range(1, 9))
+        december = self._archive(2023, range(9, 21))
+        client = HltvClient(cache_ttl=300)
+        client._download_top20_image = AsyncMock()
+
+        class FakeHltv:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def _fetch(self, url):
+                return december if url.endswith("/december") else january
+
+        with patch("core.client.Hltv", return_value=FakeHltv()):
+            players = await client.get_top20_players(2023)
+
+        self.assertEqual(len(players), 20)
+        self.assertEqual(players[0]["name"], "Player 1")
+        self.assertEqual(players[-1]["name"], "Player 20")
+        client._download_top20_image.assert_not_awaited()
+
     async def test_top20_falls_back_to_archive_ranking_when_cdn_is_forbidden(self):
         january = self._archive(2023, range(1, 9), final=True)
         december = self._archive(2023, range(9, 21))
