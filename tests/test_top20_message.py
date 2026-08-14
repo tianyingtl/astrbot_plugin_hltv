@@ -151,6 +151,7 @@ class HltvKnowledgeToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("category(string)", doc)
         self.assertIn("query(string)", doc)
         self.assertIn("必须优先调用本工具", doc)
+        self.assertIn("赛事名称/简称", doc)
 
     async def test_live_query_uses_fresh_snapshot_and_plain_text(self):
         module = _load_main_module()
@@ -280,6 +281,87 @@ class HltvKnowledgeToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Match report.", news)
         self.assertIn("#01  Player 1", top20)
         self.assertIn("NiKo (18)", top20_player)
+
+    async def test_match_queries_accept_event_aliases(self):
+        module = _load_main_module()
+
+        class Client:
+            async def get_matches(self, days=1):
+                return [
+                    {
+                        "date": "15-08-2026",
+                        "time": "18:00",
+                        "team1": "TYLOO",
+                        "team2": "Lynn Vision",
+                        "event": "Esports World Cup 2026",
+                    },
+                    {
+                        "date": "15-08-2026",
+                        "time": "20:00",
+                        "team1": "Natus Vincere",
+                        "team2": "Vitality",
+                        "event": "IEM Cologne 2026",
+                    },
+                ]
+
+            async def get_results(self, days=1):
+                return [
+                    {
+                        "date": "14-08-2026",
+                        "team1": "Spirit",
+                        "team2": "Liquid",
+                        "score1": 2,
+                        "score2": 1,
+                        "event": "Esports World Cup 2026",
+                    },
+                    {
+                        "date": "14-08-2026",
+                        "team1": "MOUZ",
+                        "team2": "Falcons",
+                        "score1": 0,
+                        "score2": 2,
+                        "event": "BLAST Open 2026",
+                    },
+                ]
+
+            async def get_live_matches(self):
+                return [
+                    {
+                        "id": 1,
+                        "team1": "Ninjas in Pyjamas",
+                        "team2": "BetBoom",
+                        "event": "Esports World Cup 2026",
+                        "best_of": "BO3",
+                    },
+                    {
+                        "id": 2,
+                        "team1": "G2",
+                        "team2": "FaZe",
+                        "event": "IEM Cologne 2026",
+                        "best_of": "BO3",
+                    },
+                ]
+
+            async def get_live_snapshot(self, match):
+                return {
+                    "maps_score": "0:0",
+                    "current_map_name": "Mirage",
+                    "current_score": "5:3",
+                }
+
+        plugin = self._plugin(module, Client())
+        event = object()
+
+        schedule = await plugin.query_hltv(event, "schedule", "EWC")
+        schedule_cn = await plugin.query_hltv(event, "schedule", "电竞世界杯")
+        results = await plugin.query_hltv(event, "results", "EWC")
+        live = await plugin.query_hltv(event, "live", "EWC")
+
+        for text in (schedule, schedule_cn, results, live):
+            self.assertIn("Esports World Cup 2026", text)
+        self.assertNotIn("IEM Cologne 2026", schedule)
+        self.assertNotIn("BLAST Open 2026", results)
+        self.assertNotIn("G2", live)
 
     async def test_missing_category_falls_back_to_player_lookup(self):
         module = _load_main_module()
