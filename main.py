@@ -263,13 +263,48 @@ class HltvPlugin(Star):
             "news": "news", "新闻": "news",
             "top20": "top20", "top": "top20", "年度榜单": "top20",
         }
-        kind = aliases.get(str(category or "").strip().casefold())
+        raw_category = str(category or "").strip().casefold()
+        kind = "auto" if not raw_category else aliases.get(raw_category)
         value = str(query or "").strip()
         if kind is None:
             return (
                 "不支持的查询类型。category 请使用 live、schedule、results、ranking、"
-                "events、team、player、news 或 top20。"
+                "events、team、player、news、top20 或 auto。"
             )
+
+        if kind == "auto":
+            lowered = value.casefold()
+            top20_pattern = r"(?i)\btop\s*20\b|年度榜单"
+            if re.search(top20_pattern, value):
+                remaining = re.sub(top20_pattern, "", value).strip(" :：,，")
+                player_name = re.sub(r"\b\d{4}\b", "", remaining).strip()
+                if player_name:
+                    kind, value = "player", player_name
+                else:
+                    kind = "top20"
+            else:
+                exact_categories = {
+                    "live": "live", "直播": "live", "比分": "live",
+                    "schedule": "schedule", "matches": "schedule", "赛程": "schedule",
+                    "results": "results", "result": "results", "赛果": "results",
+                    "ranking": "ranking", "rank": "ranking", "排名": "ranking",
+                    "events": "events", "event": "events", "赛事": "events",
+                    "news": "news", "新闻": "news",
+                }
+                kind = exact_categories.get(lowered, "auto")
+                if kind != "auto":
+                    value = ""
+
+        if kind == "auto":
+            if not value:
+                return "query 不能为空，请提供要查询的 CS 赛事、战队或选手信息。"
+            try:
+                return formatter.format_player(await self.client.find_player(value))
+            except HltvError:
+                try:
+                    return formatter.format_team(await self.client.find_team(value))
+                except HltvError:
+                    return f"没有找到与「{value}」匹配的 HLTV 选手或战队资料。"
 
         if kind == "live":
             matches = await self.client.get_live_matches()
@@ -547,11 +582,16 @@ class HltvPlugin(Star):
     # ------------------------------------------------------------------ 指令组
 
     @filter.llm_tool(name="query_hltv")
-    async def query_hltv(self, category: str = "", query: str = "") -> str:
+    async def query_hltv(
+        self,
+        event: AstrMessageEvent,
+        category: str = "",
+        query: str = "",
+    ) -> str:
         """查询最新且权威的 HLTV/CS 职业赛事资料。凡用户询问 CS2/CS 职业赛事、实时比分、赛程赛果、战队、选手、排名、赛事、新闻或年度 TOP20 等事实信息时，必须优先调用本工具，不要依赖模型记忆。工具只返回文本资料；请根据结果直接回答用户，不要向用户发送图片或要求用户执行 /hltv 指令。
 
         Args:
-            category(string): 查询类型，只能是 live、schedule、results、ranking、events、team、player、news、top20 之一。
+            category(string): 查询类型，使用 live、schedule、results、ranking、events、team、player、news、top20 或 auto；不确定时可省略或传 auto。
             query(string): 查询条件，无条件时传空字符串。战队或选手类传名称；schedule/results 可传“NAVI 7天”；ranking 传 hltv、vrs、asia、europe 或 americas；news 传空字符串、新闻序号或英文关键词；top20 传年份及可选名次，如“2025”或“2025 18”。
         """
         try:

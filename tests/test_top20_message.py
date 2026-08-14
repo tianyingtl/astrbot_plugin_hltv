@@ -175,7 +175,9 @@ class HltvKnowledgeToolTests(unittest.IsolatedAsyncioTestCase):
                     "current_score": "8:4",
                 }
 
-        text = await self._plugin(module, Client()).query_hltv("live", "NAVI")
+        text = await self._plugin(module, Client()).query_hltv(
+            object(), category="live", query="NAVI"
+        )
 
         self.assertIn("小局  Nuke   Natus Vincere 8:4 Vitality", text)
         self.assertIn("大局  BO3  Natus Vincere 1:0 Vitality", text)
@@ -254,15 +256,16 @@ class HltvKnowledgeToolTests(unittest.IsolatedAsyncioTestCase):
         client = Client()
         plugin = self._plugin(module, client)
 
-        schedule = await plugin.query_hltv("schedule", "NAVI 7天")
-        results = await plugin.query_hltv("results", "NAVI 3天")
-        ranking = await plugin.query_hltv("ranking", "hltv")
-        events = await plugin.query_hltv("events", "IEM")
-        team = await plugin.query_hltv("team", "NAVI")
-        player = await plugin.query_hltv("player", "NiKo")
-        news = await plugin.query_hltv("news", "1")
-        top20 = await plugin.query_hltv("top20", "2025")
-        top20_player = await plugin.query_hltv("top20", "2025 18")
+        event = object()
+        schedule = await plugin.query_hltv(event, "schedule", "NAVI 7天")
+        results = await plugin.query_hltv(event, "results", "NAVI 3天")
+        ranking = await plugin.query_hltv(event, "ranking", "hltv")
+        events = await plugin.query_hltv(event, "events", "IEM")
+        team = await plugin.query_hltv(event, "team", "NAVI")
+        player = await plugin.query_hltv(event, "player", "NiKo")
+        news = await plugin.query_hltv(event, "news", "1")
+        top20 = await plugin.query_hltv(event, "top20", "2025")
+        top20_player = await plugin.query_hltv(event, "top20", "2025 18")
 
         self.assertEqual(client.schedule_days, 7)
         self.assertIn("Natus Vincere", schedule)
@@ -277,6 +280,25 @@ class HltvKnowledgeToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Match report.", news)
         self.assertIn("#01  Player 1", top20)
         self.assertIn("NiKo (18)", top20_player)
+
+    async def test_missing_category_falls_back_to_player_lookup(self):
+        module = _load_main_module()
+
+        class Client:
+            async def find_player(self, nickname):
+                return {
+                    "nickname": nickname,
+                    "name": "Nikola Kovač",
+                    "team": "Falcons",
+                    "top20": [{"year": 2025, "rank": 18}],
+                }
+
+        text = await self._plugin(module, Client()).query_hltv(
+            object(), query="NiKo"
+        )
+
+        self.assertIn("NiKo", text)
+        self.assertIn("2025 #18", text)
 
 
 class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
