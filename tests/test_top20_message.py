@@ -384,11 +384,42 @@ class HltvKnowledgeToolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
-    def test_spoiler_delay_parser_accepts_units_and_rejects_non_finite_values(self):
+    async def test_spoiler_delay_names_dispatch_to_the_same_command(self):
+        module = _load_main_module()
+        calls = []
+
+        class Event:
+            @staticmethod
+            def plain_result(text):
+                return text
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+
+        async def fake_antijutou(_event, minutes=""):
+            calls.append(minutes)
+            yield "ok"
+
+        plugin.antijutou = fake_antijutou
+        for name in ("防剧透", "antijutou"):
+            results = [
+                result
+                async for result in plugin._dispatch(
+                    Event(), ["/hltv", name, "12.75"]
+                )
+            ]
+            self.assertEqual(results, ["ok"])
+
+        self.assertEqual(calls, ["12.75", "12.75"])
+
+    def test_spoiler_delay_parser_accepts_any_number_without_units(self):
         module = _load_main_module()
 
-        self.assertEqual(module.HltvPlugin._parse_spoiler_minutes("0.5 min"), 0.5)
-        self.assertEqual(module.HltvPlugin._parse_spoiler_minutes("-2分钟"), -2)
+        self.assertEqual(module.HltvPlugin._parse_spoiler_minutes("0.5"), 0.5)
+        self.assertEqual(module.HltvPlugin._parse_spoiler_minutes("20"), 20)
+        self.assertEqual(module.HltvPlugin._parse_spoiler_minutes("-2"), -2)
+        self.assertEqual(module.HltvPlugin._parse_spoiler_minutes("12.75"), 12.75)
+        self.assertIsNone(module.HltvPlugin._parse_spoiler_minutes("20 min"))
+        self.assertIsNone(module.HltvPlugin._parse_spoiler_minutes("-2分钟"))
         self.assertIsNone(module.HltvPlugin._parse_spoiler_minutes("NaN"))
         self.assertIsNone(module.HltvPlugin._parse_spoiler_minutes("Infinity"))
 

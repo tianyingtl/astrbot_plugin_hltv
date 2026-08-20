@@ -199,12 +199,12 @@ class HltvPlugin(Star):
     @staticmethod
     def _parse_spoiler_minutes(value: str) -> float | None:
         match = re.fullmatch(
-            r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?:min|m|分钟)?",
-            str(value or "").strip().casefold(),
+            r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)",
+            str(value or "").strip(),
         )
         if not match:
             return None
-        number = float(match.group(1))
+        number = float(match.group(0))
         return number if math.isfinite(number) else None
 
     def _ensure_live_watch_task(self) -> None:
@@ -981,8 +981,8 @@ class HltvPlugin(Star):
         delta = self._parse_spoiler_minutes(raw)
         if delta is None:
             yield event.plain_result(
-                "用法：/hltv 防剧透 <增减分钟>\n"
-                "例如：/hltv 防剧透 20、/hltv antijutou -2、/hltv 防剧透 0.5"
+                "用法：/hltv 防剧透 <数字>（antijutou 是同一命令）\n"
+                "只填数字，默认单位为分钟；正数增加，负数减少，支持任意小数。"
             )
             return
 
