@@ -426,12 +426,14 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_spoiler_delay_command_adjusts_current_event_and_reports_total(self):
         module = _load_main_module()
 
-        class Store:
+        class Client:
             @staticmethod
-            def all():
+            async def get_live_matches(min_stars=0):
+                self.assertEqual(min_stars, 1)
                 return [
-                    {"event": "Esports World Cup 2026", "user_id": "1"},
-                    {"event": "Esports World Cup 2026", "user_id": "2"},
+                    {"event": "Esports World Cup 2026", "rating": 5},
+                    {"event": "Esports World Cup 2026", "rating": 4},
+                    {"event": "Small Event", "rating": 2},
                 ]
 
         class Event:
@@ -442,14 +444,14 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                 return text
 
         plugin = module.HltvPlugin.__new__(module.HltvPlugin)
-        plugin.live_subscriptions = Store()
+        plugin.client = Client()
         with tempfile.TemporaryDirectory() as temp:
             plugin.spoiler_delays = module.SpoilerDelayStore(
                 Path(temp) / "spoiler-delays.json"
             )
             results = [result async for result in plugin.antijutou(Event(), "20")]
-            self.assertIn("当前额外延迟：20 分钟", results[0])
-            self.assertIn("数据出现 21 分钟后推送", results[0])
+            self.assertIn("当前 Rating 推送延迟：21 分钟", results[0])
+            self.assertNotIn("额外延迟", results[0])
             self.assertEqual(
                 plugin._rating_delay_seconds("Esports World Cup 2026"), 1260
             )
@@ -457,16 +459,21 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
 
             Event.message_str = "/hltv antijutou -2"
             results = [result async for result in plugin.antijutou(Event(), "-2")]
-            self.assertIn("当前额外延迟：18 分钟", results[0])
-            self.assertIn("数据出现 19 分钟后推送", results[0])
+            self.assertIn("当前 Rating 推送延迟：19 分钟", results[0])
 
             Event.message_str = "/hltv 防剧透 -100"
             results = [result async for result in plugin.antijutou(Event(), "-100")]
-            self.assertIn("当前额外延迟：0 分钟", results[0])
-            self.assertIn("数据出现 1 分钟后推送", results[0])
+            self.assertIn("当前 Rating 推送延迟：1 分钟", results[0])
 
-    async def test_spoiler_delay_command_rejects_missing_or_multiple_events(self):
+    async def test_spoiler_delay_command_rejects_missing_or_ambiguous_live_events(self):
         module = _load_main_module()
+
+        class Client:
+            matches = []
+
+            @classmethod
+            async def get_live_matches(cls, min_stars=0):
+                return cls.matches
 
         class Event:
             message_str = "/hltv 防剧透 20"
@@ -476,15 +483,20 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                 return text
 
         plugin = module.HltvPlugin.__new__(module.HltvPlugin)
-        plugin.live_subscriptions = types.SimpleNamespace(all=lambda: [])
+        plugin.client = Client()
         results = [result async for result in plugin.antijutou(Event(), "20")]
-        self.assertIn("没有正在追踪的赛事", results[0])
+        self.assertIn("没有正在进行的大赛", results[0])
 
-        plugin.live_subscriptions = types.SimpleNamespace(
-            all=lambda: [{"event": "Event A"}, {"event": "Event B"}]
-        )
+        Client.matches = [
+            {"event": "Event A", "rating": 5},
+            {"event": "Event B", "rating": 5},
+            {"event": "Event C", "rating": 2},
+        ]
         results = [result async for result in plugin.antijutou(Event(), "20")]
-        self.assertIn("同时追踪多个赛事", results[0])
+        self.assertIn("多个并列最高星级", results[0])
+        self.assertIn("Event A", results[0])
+        self.assertIn("Event B", results[0])
+        self.assertNotIn("Event C", results[0])
 
     async def test_live_command_outputs_snapshot_small_and_series_scores(self):
         module = _load_main_module()

@@ -20,12 +20,6 @@ def normalize_event_name(value: object) -> str:
     return re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(value or "").casefold())
 
 
-def event_query_matches(query: object, event: object) -> bool:
-    needle = normalize_event_name(query)
-    haystack = normalize_event_name(event)
-    return bool(needle and haystack and needle == haystack)
-
-
 class SpoilerDelayStore:
     """按赛事保存额外防剧透分钟数，设置对所有用户共享。"""
 

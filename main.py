@@ -53,7 +53,7 @@ from .core.subscriptions import (
     LiveSubscriptionStore,
     SpoilerDelayStore,
     advance_subscription,
-    event_query_matches,
+    normalize_event_name,
 )
 from .core.translator import Translator
 
@@ -183,13 +183,28 @@ class HltvPlugin(Star):
         value = round(float(minutes), 2)
         return str(int(value)) if value.is_integer() else f"{value:.2f}".rstrip("0").rstrip(".")
 
-    def _tracked_events(self) -> list[str]:
-        events = []
-        for item in self.live_subscriptions.all():
-            event = str(item.get("event") or "").strip()
-            if event and not any(event_query_matches(event, old) for old in events):
-                events.append(event)
-        return events
+    @staticmethod
+    def _top_live_events(matches: list[dict]) -> list[str]:
+        events: dict[str, dict] = {}
+        for match in matches:
+            name = str(match.get("event") or "").strip()
+            key = normalize_event_name(name)
+            if not key:
+                continue
+            try:
+                stars = int(match.get("rating") or 0)
+            except (TypeError, ValueError):
+                stars = 0
+            current = events.setdefault(key, {"name": name, "stars": stars})
+            current["stars"] = max(int(current["stars"]), stars)
+        if not events:
+            return []
+        highest = max(int(item["stars"]) for item in events.values())
+        return sorted(
+            str(item["name"])
+            for item in events.values()
+            if int(item["stars"]) == highest
+        )
 
     def _rating_delay_seconds(self, event: object) -> float:
         store = getattr(self, "spoiler_delays", None)
@@ -976,7 +991,7 @@ class HltvPlugin(Star):
 
     @hltv.command("antijutou", alias={"防剧透"})
     async def antijutou(self, event: AstrMessageEvent, minutes: str = ""):
-        """调整当前追踪赛事的 Rating 额外延迟分钟数。"""
+        """调整当前正在进行的大赛 Rating 延迟。"""
         raw = self._rest_after(event, {"antijutou", "防剧透"}, minutes)
         delta = self._parse_spoiler_minutes(raw)
         if delta is None:
@@ -986,17 +1001,23 @@ class HltvPlugin(Star):
             )
             return
 
-        events = self._tracked_events()
+        try:
+            events = self._top_live_events(
+                await self.client.get_live_matches(min_stars=1)
+            )
+        except HltvError as e:
+            yield event.plain_result(str(e))
+            return
         if not events:
             yield event.plain_result(
-                "当前没有正在追踪的赛事。请先用 /hltv live <战队> 或直播列表序号订阅比赛。"
+                "当前没有正在进行的大赛，防剧透设置未修改。"
             )
             return
         if len(events) > 1:
             listing = "\n".join(f"- {name}" for name in events)
             yield event.plain_result(
-                "当前同时追踪多个赛事，无法判断要修改哪一个：\n"
-                f"{listing}\n请只保留目标赛事的直播订阅后再调整。"
+                "当前有多个并列最高星级的直播赛事，无法自动确定目标：\n"
+                f"{listing}\n防剧透设置未修改。"
             )
             return
 
@@ -1013,9 +1034,7 @@ class HltvPlugin(Star):
         yield event.plain_result(
             f"已更新「{event_name}」防剧透设置。\n"
             f"本次调整：{delta_text} 分钟\n"
-            f"当前额外延迟：{self._format_minutes(extra)} 分钟\n"
-            f"Rating 将在 HLTV 数据出现 {self._format_minutes(total)} 分钟后推送"
-            f"（默认 1 分钟 + 额外 {self._format_minutes(extra)} 分钟）。\n"
+            f"当前 Rating 推送延迟：{self._format_minutes(total)} 分钟\n"
             "该设置全局生效，仅作用于本赛事。"
         )
 
