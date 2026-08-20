@@ -523,6 +523,7 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv live 1 2 3 — 按卡片序号批量订阅比赛
 /hltv live <队名> — 查看当前图十人实时战绩与选图，并订阅比赛
 /hltv live 取消 — 取消你的直播提醒
+/hltv 防剧透 <增减分钟> — 调整当前赛事 Rating 的额外延迟，支持小数和负数
 /hltv results [天数] — 近期赛果
 /hltv ranking — Valve VRS 排名（默认全球）
 /hltv ranking asia|europe|americas — 地区 VRS 排名

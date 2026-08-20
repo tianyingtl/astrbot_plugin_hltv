@@ -11,6 +11,7 @@
 
 import asyncio
 import difflib
+import math
 import re
 from datetime import timedelta
 from time import time
@@ -50,7 +51,9 @@ from .core.renderer import (
 )
 from .core.subscriptions import (
     LiveSubscriptionStore,
+    SpoilerDelayStore,
     advance_subscription,
+    event_query_matches,
 )
 from .core.translator import Translator
 
@@ -72,6 +75,7 @@ _KNOWN_SUBCOMMANDS = {
     "news", "新闻",
     "sub", "订阅",
     "unsub", "退订", "取消订阅",
+    "antijutou", "防剧透",
 }
 
 
@@ -103,6 +107,7 @@ class HltvPlugin(Star):
         )
         self._live_watch_task: asyncio.Task | None = None
         self.live_subscriptions = LiveSubscriptionStore()
+        self.spoiler_delays = SpoilerDelayStore()
         self._live_selection_cache: dict[tuple[str, str], tuple[int, list[dict]]] = {}
 
         self.client = HltvClient(
@@ -172,6 +177,35 @@ class HltvPlugin(Star):
     def _sender_name(event: AstrMessageEvent) -> str:
         getter = getattr(event, "get_sender_name", None)
         return str(getter() or "") if callable(getter) else ""
+
+    @staticmethod
+    def _format_minutes(minutes: float) -> str:
+        value = round(float(minutes), 2)
+        return str(int(value)) if value.is_integer() else f"{value:.2f}".rstrip("0").rstrip(".")
+
+    def _tracked_events(self) -> list[str]:
+        events = []
+        for item in self.live_subscriptions.all():
+            event = str(item.get("event") or "").strip()
+            if event and not any(event_query_matches(event, old) for old in events):
+                events.append(event)
+        return events
+
+    def _rating_delay_seconds(self, event: object) -> float:
+        store = getattr(self, "spoiler_delays", None)
+        extra = store.get_extra_minutes(event) if store else 0.0
+        return 60.0 + extra * 60.0
+
+    @staticmethod
+    def _parse_spoiler_minutes(value: str) -> float | None:
+        match = re.fullmatch(
+            r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?:min|m|分钟)?",
+            str(value or "").strip().casefold(),
+        )
+        if not match:
+            return None
+        number = float(match.group(1))
+        return number if math.isfinite(number) else None
 
     def _ensure_live_watch_task(self) -> None:
         if self._live_watch_task is None or self._live_watch_task.done():
@@ -940,6 +974,51 @@ class HltvPlugin(Star):
             log_name="新闻卡片",
         )
 
+    @hltv.command("antijutou", alias={"防剧透"})
+    async def antijutou(self, event: AstrMessageEvent, minutes: str = ""):
+        """调整当前追踪赛事的 Rating 额外延迟分钟数。"""
+        raw = self._rest_after(event, {"antijutou", "防剧透"}, minutes)
+        delta = self._parse_spoiler_minutes(raw)
+        if delta is None:
+            yield event.plain_result(
+                "用法：/hltv 防剧透 <增减分钟>\n"
+                "例如：/hltv 防剧透 20、/hltv antijutou -2、/hltv 防剧透 0.5"
+            )
+            return
+
+        events = self._tracked_events()
+        if not events:
+            yield event.plain_result(
+                "当前没有正在追踪的赛事。请先用 /hltv live <战队> 或直播列表序号订阅比赛。"
+            )
+            return
+        if len(events) > 1:
+            listing = "\n".join(f"- {name}" for name in events)
+            yield event.plain_result(
+                "当前同时追踪多个赛事，无法判断要修改哪一个：\n"
+                f"{listing}\n请只保留目标赛事的直播订阅后再调整。"
+            )
+            return
+
+        event_name = events[0]
+        store = getattr(self, "spoiler_delays", None)
+        if store is None:
+            store = SpoilerDelayStore()
+            self.spoiler_delays = store
+        extra = store.adjust_extra_minutes(event_name, delta)
+        total = 1.0 + extra
+        delta_text = self._format_minutes(delta)
+        if delta > 0:
+            delta_text = f"+{delta_text}"
+        yield event.plain_result(
+            f"已更新「{event_name}」防剧透设置。\n"
+            f"本次调整：{delta_text} 分钟\n"
+            f"当前额外延迟：{self._format_minutes(extra)} 分钟\n"
+            f"Rating 将在 HLTV 数据出现 {self._format_minutes(total)} 分钟后推送"
+            f"（默认 1 分钟 + 额外 {self._format_minutes(extra)} 分钟）。\n"
+            "该设置全局生效，仅作用于本赛事。"
+        )
+
     @staticmethod
     def _typo_hint(typo: str) -> str:
         close = difflib.get_close_matches(
@@ -989,6 +1068,8 @@ class HltvPlugin(Star):
             handler = self.player(event)
         elif sub in ("news", "新闻"):
             handler = self.news(event, index=_int_arg())
+        elif sub in ("antijutou", "防剧透"):
+            handler = self.antijutou(event, minutes=" ".join(args))
         elif sub in ("sub", "订阅"):
             handler = self.sub(event)
         elif sub in ("unsub", "退订", "取消订阅"):
@@ -1159,7 +1240,14 @@ class HltvPlugin(Star):
             for item in subscribers:
                 if not self.live_subscriptions.contains(item):
                     continue
-                updated, events, finished = advance_subscription(item, snapshot, now=now)
+                updated, events, finished = advance_subscription(
+                    item,
+                    snapshot,
+                    now=now,
+                    rating_delay_seconds=self._rating_delay_seconds(
+                        snapshot.get("event") or item.get("event")
+                    ),
+                )
                 if not events:
                     self.live_subscriptions.update(updated)
                     continue

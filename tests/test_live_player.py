@@ -56,7 +56,11 @@ from core.renderer import (
     render_top20_card,
     render_top20_player_card,
 )
-from core.subscriptions import LiveSubscriptionStore, advance_subscription
+from core.subscriptions import (
+    LiveSubscriptionStore,
+    SpoilerDelayStore,
+    advance_subscription,
+)
 from core.translator import Translator
 
 
@@ -1626,6 +1630,119 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LiveSubscriptionTests(unittest.TestCase):
+    def test_spoiler_delay_is_persistent_global_and_event_scoped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "spoiler-delays.json"
+            first = SpoilerDelayStore(path)
+            self.assertEqual(first.adjust_extra_minutes("EWC 2026", 0.5), 0.5)
+            self.assertEqual(first.adjust_extra_minutes("EWC 2026", 20), 20.5)
+
+            second = SpoilerDelayStore(path)
+            self.assertEqual(second.get_extra_minutes("EWC 2026"), 20.5)
+            self.assertEqual(second.get_extra_minutes("EWC 2027"), 0)
+            self.assertEqual(second.adjust_extra_minutes("EWC 2026", -2), 18.5)
+            self.assertEqual(second.adjust_extra_minutes("EWC 2026", -100), 0)
+
+    def test_map_rating_waits_for_configured_delay(self):
+        subscription = {"last_map_index": 1, "sent_map_ratings": []}
+        snapshot = {
+            "status": "live",
+            "best_of": "BO3",
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "ratings": [{"team": "A", "players": []}],
+                }
+            ],
+        }
+
+        waiting, events, finished = advance_subscription(
+            subscription, snapshot, now=100, rating_delay_seconds=60
+        )
+        self.assertEqual(events, [])
+        self.assertFalse(finished)
+        waiting, events, _ = advance_subscription(
+            waiting, snapshot, now=159, rating_delay_seconds=60
+        )
+        self.assertEqual(events, [])
+        updated, events, _ = advance_subscription(
+            waiting, snapshot, now=160, rating_delay_seconds=60
+        )
+        self.assertEqual([event["kind"] for event in events], ["map_finished"])
+        self.assertEqual(updated["sent_map_ratings"], [1])
+
+    def test_final_map_and_match_rating_share_the_same_delay_timer(self):
+        subscription = {"last_map_index": 3, "sent_map_ratings": [1, 2]}
+        snapshot = {
+            "status": "finished",
+            "best_of": "BO3",
+            "maps": [
+                {"ordinal": 1, "finished": True},
+                {"ordinal": 2, "finished": True},
+                {"ordinal": 3, "finished": True},
+            ],
+            "map_ratings": [
+                {
+                    "index": 3,
+                    "map": "Ancient",
+                    "ratings": [{"team": "A", "players": []}],
+                }
+            ],
+            "ratings": [{"team": "A", "players": [{"nickname": "alpha"}]}],
+        }
+
+        waiting, events, finished = advance_subscription(
+            subscription, snapshot, now=100, rating_delay_seconds=1260
+        )
+        self.assertEqual(events, [])
+        self.assertFalse(finished)
+        waiting, events, finished = advance_subscription(
+            waiting, snapshot, now=1359, rating_delay_seconds=1260
+        )
+        self.assertEqual(events, [])
+        self.assertFalse(finished)
+        _, events, finished = advance_subscription(
+            waiting, snapshot, now=1360, rating_delay_seconds=1260
+        )
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["map_finished", "match_finished"],
+        )
+        self.assertTrue(finished)
+
+    def test_bo1_waits_then_emits_only_one_rating(self):
+        subscription = {"last_map_index": 1, "sent_map_ratings": []}
+        snapshot = {
+            "status": "finished",
+            "best_of": "BO1",
+            "maps": [{"ordinal": 1, "finished": True}],
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "ratings": [{"team": "A", "players": []}],
+                }
+            ],
+            "ratings": [{"team": "A", "players": []}],
+        }
+
+        waiting, events, finished = advance_subscription(
+            subscription, snapshot, now=100, rating_delay_seconds=60
+        )
+        self.assertEqual(events, [])
+        self.assertFalse(finished)
+        updated, events, finished = advance_subscription(
+            waiting, snapshot, now=160, rating_delay_seconds=60
+        )
+        self.assertEqual([event["kind"] for event in events], ["map_finished"])
+        self.assertTrue(finished)
+        _, repeated, finished = advance_subscription(
+            updated, snapshot, now=161, rating_delay_seconds=60
+        )
+        self.assertEqual(repeated, [])
+        self.assertTrue(finished)
+
     def test_store_is_persistent_and_deduplicates(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "subscriptions.json"

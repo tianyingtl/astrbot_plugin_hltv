@@ -1,6 +1,8 @@
 """直播比赛订阅的持久化与状态流转。"""
 
 import json
+import math
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -8,6 +10,81 @@ from typing import Any
 
 def default_subscription_path() -> Path:
     return Path.home() / ".astrbot_plugin_hltv" / "live_subscriptions.json"
+
+
+def default_spoiler_delay_path() -> Path:
+    return Path.home() / ".astrbot_plugin_hltv" / "spoiler_delays.json"
+
+
+def normalize_event_name(value: object) -> str:
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(value or "").casefold())
+
+
+def event_query_matches(query: object, event: object) -> bool:
+    needle = normalize_event_name(query)
+    haystack = normalize_event_name(event)
+    return bool(needle and haystack and needle == haystack)
+
+
+class SpoilerDelayStore:
+    """按赛事保存额外防剧透分钟数，设置对所有用户共享。"""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or default_spoiler_delay_path()
+        self._items = self._load()
+
+    def _load(self) -> dict[str, dict]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        result = {}
+        for key, item in data.items():
+            try:
+                extra = item.get("extra_minutes", 0) if isinstance(item, dict) else item
+                value = float(extra)
+                normalized = normalize_event_name(key)
+                if not normalized or not math.isfinite(value):
+                    continue
+                result[normalized] = {
+                    "name": str(item.get("name") or key) if isinstance(item, dict) else str(key),
+                    "extra_minutes": max(0.0, value),
+                }
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.path.with_suffix(".tmp")
+        temp.write_text(json.dumps(self._items, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(self.path)
+
+    def get_extra_minutes(self, event: object) -> float:
+        key = normalize_event_name(event)
+        item = self._items.get(key) or {}
+        return float(item.get("extra_minutes", 0))
+
+    def set_extra_minutes(self, event: object, minutes: float) -> float:
+        key = normalize_event_name(event)
+        if not key:
+            raise ValueError("赛事名称不能为空")
+        value = float(minutes)
+        if not math.isfinite(value):
+            raise ValueError("延迟分钟数必须是有限数字")
+        value = max(0.0, value)
+        self._items[key] = {"name": str(event).strip() or key, "extra_minutes": value}
+        self._save()
+        return value
+
+    def adjust_extra_minutes(self, event: object, delta: float) -> float:
+        value = float(delta)
+        if not math.isfinite(value):
+            raise ValueError("延迟分钟数必须是有限数字")
+        current = self.get_extra_minutes(event)
+        return self.set_extra_minutes(event, current + value)
 
 
 def subscription_key(item: dict) -> tuple[str, str, str]:
@@ -147,32 +224,60 @@ def advance_subscription(
     *,
     now: int | None = None,
     rating_wait_seconds: int = 180,
+    rating_delay_seconds: float = 0,
 ) -> tuple[dict, list[dict], bool]:
     """用一次比赛快照推进订阅，返回（新状态、事件、是否完成）。"""
     updated = dict(subscription)
     is_bo1 = _is_bo1(snapshot)
+    current = int(time.time()) if now is None else int(now)
+    delay = max(0.0, float(rating_delay_seconds))
     sent_map_ratings = {
         int(index)
         for index in (updated.get("sent_map_ratings") or [])
         if str(index).isdigit() and int(index) > 0
     }
+    pending_ratings = {
+        str(index): float(timestamp)
+        for index, timestamp in (updated.get("rating_pending_at") or {}).items()
+        if str(index).isdigit() and float(timestamp or 0) > 0
+    }
+    if (
+        str(snapshot.get("status")) == "finished"
+        and snapshot.get("ratings")
+        and delay > 0
+        and not updated.get("match_rating_pending_at")
+    ):
+        updated["match_rating_pending_at"] = current
     events = []
     for map_rating in snapshot.get("map_ratings") or []:
         index = int(map_rating.get("index") or 0)
         if index <= 0 or index in sent_map_ratings or not map_rating.get("ratings"):
             continue
+        first_seen = pending_ratings.get(str(index))
+        if first_seen is None and delay > 0:
+            pending_ratings[str(index)] = float(current)
+            continue
+        if delay > 0 and current - (first_seen or current) < delay:
+            continue
         events.append(
             {"kind": "map_finished", "snapshot": snapshot, "map": map_rating}
         )
         sent_map_ratings.add(index)
+        pending_ratings.pop(str(index), None)
         if is_bo1:
             updated["bo1_rating_sent"] = True
     updated["sent_map_ratings"] = sorted(sent_map_ratings)
+    if pending_ratings:
+        updated["rating_pending_at"] = pending_ratings
+    else:
+        updated.pop("rating_pending_at", None)
 
     if str(snapshot.get("status")) == "finished":
         if is_bo1 and updated.get("bo1_rating_sent"):
             updated.pop("finished_seen_at", None)
             return updated, events, True
+        if is_bo1 and snapshot.get("map_ratings") and not updated.get("bo1_rating_sent"):
+            return updated, events, False
         completed_map_indexes = {
             int(item.get("index") or item.get("ordinal") or position)
             for position, item in enumerate(snapshot.get("maps") or [], start=1)
@@ -180,18 +285,31 @@ def advance_subscription(
             and item.get("finished")
             and str(item.get("index") or item.get("ordinal") or position).isdigit()
         }
-        waiting_for_map_rating = bool(
-            completed_map_indexes - sent_map_ratings
-        ) and not is_bo1
+        missing_map_indexes = completed_map_indexes - sent_map_ratings
+        available_map_indexes = {
+            int(item.get("index") or 0)
+            for item in snapshot.get("map_ratings") or []
+            if str(item.get("index") or "").isdigit() and item.get("ratings")
+        }
+        if missing_map_indexes & available_map_indexes:
+            return updated, events, False
+        waiting_for_map_rating = bool(missing_map_indexes) and not is_bo1
         if waiting_for_map_rating or not snapshot.get("ratings"):
-            current = int(time.time()) if now is None else int(now)
             first_seen = int(updated.get("finished_seen_at") or 0)
             if not first_seen:
                 updated["finished_seen_at"] = current
                 return updated, events, False
             if current - first_seen < max(0, int(rating_wait_seconds)):
                 return updated, events, False
+        match_first_seen = float(updated.get("match_rating_pending_at") or 0)
+        if snapshot.get("ratings"):
+            if not match_first_seen and delay > 0:
+                updated["match_rating_pending_at"] = current
+                return updated, events, False
+            if delay > 0 and current - match_first_seen < delay:
+                return updated, events, False
         updated.pop("finished_seen_at", None)
+        updated.pop("match_rating_pending_at", None)
         events.append({"kind": "match_finished", "snapshot": snapshot})
         return updated, events, True
 
