@@ -209,7 +209,7 @@ class HltvPlugin(Star):
     def _rating_delay_seconds(self, event: object) -> float:
         store = getattr(self, "spoiler_delays", None)
         extra = store.get_extra_minutes(event) if store else 0.0
-        return 60.0 + extra * 60.0
+        return extra * 60.0
 
     @staticmethod
     def _parse_spoiler_minutes(value: str) -> float | None:
@@ -1027,7 +1027,7 @@ class HltvPlugin(Star):
             store = SpoilerDelayStore()
             self.spoiler_delays = store
         extra = store.adjust_extra_minutes(event_name, delta)
-        total = 1.0 + extra
+        total = extra
         delta_text = self._format_minutes(delta)
         if delta > 0:
             delta_text = f"+{delta_text}"

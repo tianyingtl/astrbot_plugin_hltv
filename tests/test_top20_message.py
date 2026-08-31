@@ -450,20 +450,20 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                 Path(temp) / "spoiler-delays.json"
             )
             results = [result async for result in plugin.antijutou(Event(), "20")]
-            self.assertIn("当前 Rating 推送延迟：21 分钟", results[0])
+            self.assertIn("当前 Rating 推送延迟：20 分钟", results[0])
             self.assertNotIn("额外延迟", results[0])
             self.assertEqual(
-                plugin._rating_delay_seconds("Esports World Cup 2026"), 1260
+                plugin._rating_delay_seconds("Esports World Cup 2026"), 1200
             )
-            self.assertEqual(plugin._rating_delay_seconds("Other Event 2026"), 60)
+            self.assertEqual(plugin._rating_delay_seconds("Other Event 2026"), 0)
 
             Event.message_str = "/hltv antijutou -2"
             results = [result async for result in plugin.antijutou(Event(), "-2")]
-            self.assertIn("当前 Rating 推送延迟：19 分钟", results[0])
+            self.assertIn("当前 Rating 推送延迟：18 分钟", results[0])
 
             Event.message_str = "/hltv 防剧透 -100"
             results = [result async for result in plugin.antijutou(Event(), "-100")]
-            self.assertIn("当前 Rating 推送延迟：1 分钟", results[0])
+            self.assertIn("当前 Rating 推送延迟：0 分钟", results[0])
 
     async def test_spoiler_delay_command_rejects_missing_or_ambiguous_live_events(self):
         module = _load_main_module()
