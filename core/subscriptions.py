@@ -7,13 +7,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .storage import plugin_data_dir
+
 
 def default_subscription_path() -> Path:
-    return Path.home() / ".astrbot_plugin_hltv" / "live_subscriptions.json"
+    return plugin_data_dir() / "live_subscriptions.json"
 
 
 def default_spoiler_delay_path() -> Path:
-    return Path.home() / ".astrbot_plugin_hltv" / "spoiler_delays.json"
+    return plugin_data_dir() / "spoiler_delays.json"
 
 
 def normalize_event_name(value: object) -> str:

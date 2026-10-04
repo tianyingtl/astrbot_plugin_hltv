@@ -51,6 +51,12 @@ pip install -r requirements.txt
 
 随后在 AstrBot WebUI 中重载插件。
 
+## 数据存储
+
+直播订阅、防剧透设置、渲染卡片和图片缓存均存储在 AstrBot 标准插件数据目录：
+`data/plugin_data/astrbot_plugin_hltv/`。首次加载时会自动兼容旧版
+`~/.astrbot_plugin_hltv/` 数据；迁移只补缺失文件，不覆盖新数据，也不会删除旧目录。
+
 ## 常用操作
 
 | 需求 | 指令 |

@@ -55,6 +55,7 @@ from .core.subscriptions import (
     advance_subscription,
     normalize_event_name,
 )
+from .core.storage import migrate_legacy_data
 from .core.translator import Translator
 
 _REGION_CN = {"Asia": "亚洲", "Europe": "欧洲", "Americas": "美洲"}
@@ -106,6 +107,7 @@ class HltvPlugin(Star):
             20, min(int(config.get("live_poll_interval", 45)), 300)
         )
         self._live_watch_task: asyncio.Task | None = None
+        migrate_legacy_data()
         self.live_subscriptions = LiveSubscriptionStore()
         self.spoiler_delays = SpoilerDelayStore()
         self._live_selection_cache: dict[tuple[str, str], tuple[int, list[dict]]] = {}

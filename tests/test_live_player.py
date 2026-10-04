@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import types
@@ -37,6 +38,7 @@ from core.renderer import (
     BUNDLED_FONT_BOLD,
     CARD_BASE_BACKGROUND,
     CARD_SIZE,
+    DEFAULT_OUTPUT_DIR,
     PLAYER_CARD_SIZE,
     RATING_CARD_SIZE,
     LIVE_DETAIL_CARD_SIZE,
@@ -61,6 +63,7 @@ from core.subscriptions import (
     SpoilerDelayStore,
     advance_subscription,
 )
+from core.storage import migrate_legacy_data, plugin_data_dir
 from core.translator import Translator
 
 
@@ -550,7 +553,7 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
                 self.subTest(image_url=image_url),
                 tempfile.TemporaryDirectory() as tmp,
                 patch("core.client.CurlSession", object()),
-                patch.object(Path, "home", return_value=Path(tmp)),
+                patch("core.client.plugin_data_dir", return_value=Path(tmp)),
                 patch.object(
                     HltvClient,
                     "_download_top20_image_browser",
@@ -1630,6 +1633,90 @@ class ScorebotSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LiveSubscriptionTests(unittest.TestCase):
+    def test_plugin_data_dir_prefers_astrbot_data_path(self):
+        astrbot_core = types.ModuleType("astrbot.core")
+        astrbot_utils = types.ModuleType("astrbot.core.utils")
+        astrbot_path = types.ModuleType("astrbot.core.utils.astrbot_path")
+        astrbot_path.get_astrbot_data_path = lambda: "/AstrBot/data"
+        with patch.dict(
+            sys.modules,
+            {
+                "astrbot.core": astrbot_core,
+                "astrbot.core.utils": astrbot_utils,
+                "astrbot.core.utils.astrbot_path": astrbot_path,
+            },
+        ):
+            self.assertEqual(
+                plugin_data_dir(),
+                Path("/AstrBot/data/plugin_data/astrbot_plugin_hltv"),
+            )
+
+        with patch.dict(os.environ, {"ASTRBOT_ROOT": "/AstrBot"}):
+            self.assertEqual(
+                plugin_data_dir(),
+                Path("/AstrBot/data/plugin_data/astrbot_plugin_hltv"),
+            )
+
+    def test_plugin_data_paths_use_astrbot_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with (
+                patch("core.storage.plugin_data_dir", return_value=root),
+                patch("core.subscriptions.plugin_data_dir", return_value=root),
+            ):
+                from core import subscriptions
+
+                self.assertEqual(
+                    subscriptions.default_subscription_path(),
+                    root / "live_subscriptions.json",
+                )
+                self.assertEqual(
+                    subscriptions.default_spoiler_delay_path(),
+                    root / "spoiler_delays.json",
+                )
+            self.assertEqual(
+                plugin_data_dir().parts[-2:],
+                ("plugin_data", "astrbot_plugin_hltv"),
+            )
+            self.assertEqual(
+                DEFAULT_OUTPUT_DIR.parts[-3:],
+                ("plugin_data", "astrbot_plugin_hltv", "cards"),
+            )
+
+    def test_legacy_data_is_copied_without_overwrite_or_deletion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            legacy = root / "legacy"
+            canonical = root / "canonical"
+            (legacy / "cards").mkdir(parents=True)
+            (legacy / "media").mkdir()
+            (legacy / "live_subscriptions.json").write_text("old", encoding="utf-8")
+            (legacy / "cards" / "card.png").write_bytes(b"old-card")
+            (legacy / "media" / "icon.png").write_bytes(b"old-icon")
+            (canonical / "cards").mkdir(parents=True)
+            (canonical / "live_subscriptions.json").write_text("new", encoding="utf-8")
+            (canonical / "cards" / "card.png").write_bytes(b"new-card")
+
+            with (
+                patch("core.storage.legacy_data_dir", return_value=legacy),
+                patch("core.storage.plugin_data_dir", return_value=canonical),
+            ):
+                self.assertTrue(migrate_legacy_data())
+
+            self.assertEqual(
+                (canonical / "live_subscriptions.json").read_text(encoding="utf-8"),
+                "new",
+            )
+            self.assertEqual(
+                (canonical / "cards" / "card.png").read_bytes(),
+                b"new-card",
+            )
+            self.assertEqual(
+                (canonical / "media" / "icon.png").read_bytes(),
+                b"old-icon",
+            )
+            self.assertTrue((legacy / "live_subscriptions.json").exists())
+
     def test_spoiler_delay_is_persistent_global_and_event_scoped(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "spoiler-delays.json"

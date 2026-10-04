@@ -30,6 +30,8 @@ from PIL import Image, UnidentifiedImageError
 
 from astrbot.api import logger
 
+from .storage import plugin_data_dir
+
 try:
     from curl_cffi import CurlError
     from curl_cffi.const import CurlECode, CurlWsFlag
@@ -1842,7 +1844,7 @@ class HltvClient:
         if not references:
             return player
 
-        cache_dir = Path.home() / ".astrbot_plugin_hltv" / "media"
+        cache_dir = plugin_data_dir() / "media"
         cache_dir.mkdir(parents=True, exist_ok=True)
         timeout = aiohttp.ClientTimeout(total=min(self._timeout, 6))
         proxy = self._proxy_list[0] if self._proxy_list else None
@@ -2224,7 +2226,7 @@ class HltvClient:
         if parsed.scheme != "https" or parsed.hostname not in _TOP20_IMAGE_HOSTS:
             raise HltvError("TOP20 图片地址无效。")
 
-        cache_dir = Path.home() / ".astrbot_plugin_hltv" / "top20"
+        cache_dir = plugin_data_dir() / "top20"
         cache_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(url.encode()).hexdigest()[:16]
         stem = f"top20_{year}_{digest}"

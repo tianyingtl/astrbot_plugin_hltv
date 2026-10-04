@@ -11,6 +11,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from .formatter import news_titles
+from .storage import plugin_data_dir
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,7 +25,7 @@ BACKGROUND_POOL = (
     PORTRAIT_BACKGROUND,
     CARD_BASE_BACKGROUND,
 )
-DEFAULT_OUTPUT_DIR = Path.home() / ".astrbot_plugin_hltv" / "cards"
+DEFAULT_OUTPUT_DIR = plugin_data_dir() / "cards"
 BUNDLED_FONT = ROOT / "assets" / "fonts" / "HLTVCardSans-Regular.otf"
 BUNDLED_FONT_BOLD = ROOT / "assets" / "fonts" / "HLTVCardSans-Bold.otf"
 CARD_SIZE = (1600, 1000)
