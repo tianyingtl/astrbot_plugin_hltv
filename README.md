@@ -1,4 +1,4 @@
-# astrbot_plugin_hltv
+# CS2赛事 HLTV 多功能查询
 
 面向 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的 HLTV 查询与比赛提醒插件。
 提供 CS2 赛程、实时比分、赛果、排名、战队与选手资料、新闻翻译、年度 TOP20，
