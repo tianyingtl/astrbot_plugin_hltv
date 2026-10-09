@@ -1648,6 +1648,25 @@ class HltvClient:
                         s.get_text(strip=True)
                         for s in row.find_all("span", class_="score")
                     ]
+                    match_link = row.find(
+                        "a", href=lambda href: bool(href and href.startswith("/matches/"))
+                    )
+                    match_id = ""
+                    match_url = ""
+                    if match_link is not None:
+                        match_url = urljoin(
+                            "https://www.hltv.org", str(match_link["href"])
+                        )
+                        id_match = re.search(r"/matches/(\d+)/", match_url)
+                        match_id = id_match.group(1) if id_match else ""
+                    event_el = row.select_one("a.event-name") or row.select_one(
+                        "a[href^='/events/']"
+                    )
+                    event = event_el.get_text(" ", strip=True) if event_el else ""
+                    numeric_scores = [
+                        score if score.isdigit() else "" for score in scores[:2]
+                    ]
+                    upcoming = not all(numeric_scores)
                     # 实测原始 HTML：败方 flex 带 'lost' 类，胜方【没有】
                     # 'won' 类（浏览器渲染后才有），故用无 lost 判定获胜。
                     # 第一个 team-flex 恒为本队列。
@@ -1659,8 +1678,24 @@ class HltvClient:
                         {
                             "date": d,
                             "opp": opp,
-                            "score": "-".join(scores[:2]) if len(scores) >= 2 else "",
+                            "score": (
+                                "-".join(numeric_scores)
+                                if len(numeric_scores) == 2 and all(numeric_scores)
+                                else ""
+                            ),
                             "won": won,
+                            "id": match_id,
+                            "url": match_url,
+                            "team1": names[0] if names else str(info["title"]),
+                            "team2": names[1] if len(names) > 1 else opp,
+                            "score1": (
+                                numeric_scores[0] if len(numeric_scores) > 0 else ""
+                            ),
+                            "score2": (
+                                numeric_scores[1] if len(numeric_scores) > 1 else ""
+                            ),
+                            "event": event,
+                            "upcoming": upcoming,
                         }
                     )
                 except Exception:

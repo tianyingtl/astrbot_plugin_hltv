@@ -346,6 +346,8 @@ class HltvPlugin(Star):
         seen: set[str] = set()
 
         def append(match: dict, source: str):
+            if match.get("upcoming"):
+                source = "upcoming"
             match_id = str(match.get("id") or match.get("match_id") or "")
             url = str(match.get("url") or "")
             if not match_id or not url:
@@ -362,7 +364,10 @@ class HltvPlugin(Star):
                     "score1": match.get("score1", ""),
                     "score2": match.get("score2", ""),
                     "maps_score": str(match.get("maps_score") or ""),
-                    "event": str(match.get("event") or ""),
+                    "event": str(
+                        match.get("event")
+                        or ("HLTV 战队页" if source in {"team_page", "upcoming"} else "")
+                    ),
                     "date": str(match.get("date") or ""),
                     "source": source,
                 }
@@ -380,26 +385,39 @@ class HltvPlugin(Star):
                     append(match, "live")
         except HltvError as e:
             errors.append(e)
+
+        find_team = getattr(self.client, "find_team", None)
+        if find_team is not None:
+            try:
+                team = await find_team(name)
+                for match in team.get("recent") or []:
+                    if self._team_query_match(name, match):
+                        append(match, "team_page")
+            except HltvError as e:
+                errors.append(e)
+
         try:
             for match in await self.client.get_results(days=7):
                 if self._team_query_match(name, match):
                     append(match, "result")
         except HltvError as e:
-            if not candidates and errors:
-                raise errors[0]
             if not candidates:
                 raise e
+        if not candidates and errors:
+            raise errors[0]
 
         limit = self.max_items if self.max_items > 0 else len(candidates)
         return candidates[:limit]
 
     @staticmethod
     def _format_rating_matches(name: str, matches: list[dict]) -> str:
-        lines = [f"📊 {name} 近 7 天可回看 Rating 的比赛"]
+        lines = [f"📊 {name} 可回看 Rating 的近期比赛"]
         for index, match in enumerate(matches, start=1):
             status = {
                 "subscription": "追踪中",
                 "live": "LIVE",
+                "team_page": "近期比赛",
+                "upcoming": "待开赛",
                 "result": "已结束",
             }.get(str(match.get("source")), "已结束")
             if match.get("maps_score"):
@@ -879,6 +897,12 @@ class HltvPlugin(Star):
             )
             return
         selected = matches[match_index - 1]
+        if selected.get("source") == "upcoming":
+            yield event.plain_result(
+                "这场比赛还没开赛，暂无 Rating。\n"
+                f"可用 /hltv live {team_name} 订阅开赛和逐图提醒。"
+            )
+            return
         try:
             snapshot = await self.client.get_match_snapshot(
                 selected["id"], selected["url"]

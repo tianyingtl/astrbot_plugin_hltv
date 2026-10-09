@@ -2,6 +2,6 @@ name: astrbot_plugin_hltv
 display_name: CS2赛事 HLTV 多功能查询
 short_desc: CS2 赛事比分、Rating、TOP20 与资料查询。
 desc: CS2赛事HLTV 查询插件。直播比分与提醒、逐图及完赛 Rating、年度 TOP20、战队/选手图片卡、赛程赛果、双排名、中英双语新闻与每日推送。
-version: v3.0.5
+version: v3.0.6
 author: tianying
 repo: https://github.com/tianyingtl/astrbot_plugin_hltv

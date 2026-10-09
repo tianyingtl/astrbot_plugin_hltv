@@ -2258,12 +2258,20 @@ class TeamTests(unittest.IsolatedAsyncioTestCase):
             <td><div class="team-flex lost"></div></td>
             <td><a class="team-name">100 Thieves</a><a class="team-name">Spirit</a></td>
             <td><span class="score">1</span><span class="score">2</span></td>
+            <td><a href="/matches/2368549/thieves-spirit">详情</a>
+                <a class="event-name" href="/events/123/test-event">Test Event</a></td>
           </tr>
           <tr class="team-row">
             <td><span data-unix="1784995200000"></span></td>
             <td><div class="team-flex"></div></td>
             <td><a class="team-name">100 Thieves</a><a class="team-name">MOUZ</a></td>
             <td><span class="score">2</span><span class="score">0</span></td>
+          </tr>
+          <tr class="team-row">
+            <td><span data-unix="1785168000000"></span></td>
+            <td><div class="team-flex"></div></td>
+            <td><a class="team-name">100 Thieves</a><a class="team-name">Lynn Vision</a></td>
+            <td><span class="score">-</span><span class="score">-</span></td>
           </tr>
         </table></div>
         """
@@ -2272,8 +2280,26 @@ class TeamTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [(item["opp"], item["score"], item["won"]) for item in team["recent"]],
-            [("Spirit", "1-2", False), ("MOUZ", "2-0", True)],
+            [
+                ("Spirit", "1-2", False),
+                ("MOUZ", "2-0", True),
+                ("Lynn Vision", "", True),
+            ],
         )
+        self.assertEqual(team["recent"][0]["id"], "2368549")
+        self.assertEqual(
+            team["recent"][0]["url"],
+            "https://www.hltv.org/matches/2368549/thieves-spirit",
+        )
+        self.assertEqual(team["recent"][0]["team1"], "100 Thieves")
+        self.assertEqual(team["recent"][0]["team2"], "Spirit")
+        self.assertEqual(team["recent"][0]["score1"], "1")
+        self.assertEqual(team["recent"][0]["score2"], "2")
+        self.assertEqual(team["recent"][0]["event"], "Test Event")
+        self.assertFalse(team["recent"][0]["upcoming"])
+        self.assertTrue(team["recent"][2]["upcoming"])
+        self.assertEqual(team["recent"][2]["score1"], "")
+        self.assertEqual(team["recent"][2]["score2"], "")
 
 
 class RendererTests(unittest.TestCase):

@@ -944,6 +944,72 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(render.call_args.kwargs["map_rating"]["index"], 1)
         plugin.client.get_match_snapshot.assert_awaited_with("123", live_match["url"])
 
+    async def test_rating_prefers_team_page_when_results_are_truncated(self):
+        module = _load_main_module()
+        finished = {
+            "id": "9002",
+            "url": "https://www.hltv.org/matches/9002/falcons-lynn-vision",
+            "team1": "Falcons",
+            "team2": "Lynn Vision",
+            "score1": "2",
+            "score2": "1",
+            "event": "IEM Test",
+            "date": "10-08",
+            "upcoming": False,
+        }
+        upcoming = {
+            "id": "9003",
+            "url": "https://www.hltv.org/matches/9003/falcons-mongolz",
+            "team1": "Falcons",
+            "team2": "The MongolZ",
+            "score1": "",
+            "score2": "",
+            "date": "10-10",
+            "upcoming": True,
+        }
+
+        class Client:
+            find_team = AsyncMock(return_value={"recent": [finished, upcoming]})
+            get_match_snapshot = AsyncMock(side_effect=AssertionError)
+
+            async def get_live_matches(self):
+                return []
+
+            async def get_results(self, days=1):
+                return []
+
+        class Event:
+            unified_msg_origin = "group:1"
+
+            def __init__(self, message):
+                self.message_str = message
+
+            @staticmethod
+            def get_sender_id():
+                return "42"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.live_subscriptions = types.SimpleNamespace(all=lambda: [])
+        plugin.max_items = 5
+        plugin._rating_selection_cache = {}
+
+        results = [result async for result in plugin.rating(Event("/hltv rating 猎鹰"))]
+        self.assertIn("1. [近期比赛] Falcons 2:1 Lynn Vision", results[0])
+        self.assertIn("2. [待开赛] Falcons vs The MongolZ", results[0])
+        self.assertIn("HLTV 战队页", results[0])
+        plugin.client.find_team.assert_awaited_once_with("猎鹰")
+
+        results = [
+            result async for result in plugin.rating(Event("/hltv rating 猎鹰 2"))
+        ]
+        self.assertIn("这场比赛还没开赛，暂无 Rating", results[0])
+        plugin.client.get_match_snapshot.assert_not_awaited()
+
     async def test_rating_shorthand_and_bo1_return_one_card(self):
         module = _load_main_module()
         snapshot = {
