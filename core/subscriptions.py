@@ -156,6 +156,9 @@ class LiveSubscriptionStore:
                 item["start_unix"] = int(float(match.get("unix") or 0))
             except (TypeError, ValueError):
                 item["start_unix"] = 0
+        best_of = str(snapshot.get("best_of") or "").upper().replace(" ", "")
+        if best_of in {"BO1", "BESTOF1"} and item["sent_map_ratings"]:
+            item["bo1_rating_sent"] = True
         key = subscription_key(item)
         if not all(key) or any(subscription_key(old) == key for old in self._items):
             return False

@@ -476,11 +476,12 @@ class HltvPlugin(Star):
         limit: int,
         *,
         detailed: bool = False,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, list[tuple[dict, dict]]]:
         scored, failures = await self._fetch_live_scores(
             matches, limit, detailed=detailed
         )
         watched = already_watching = 0
+        missed_ratings: list[tuple[dict, dict]] = []
         sender_id = self._sender_id(event)
         sender_name = self._sender_name(event)
         umo = str(getattr(event, "unified_msg_origin", ""))
@@ -497,6 +498,11 @@ class HltvPlugin(Star):
                 )
                 if added:
                     watched += 1
+                    missed_ratings.extend(
+                        (snapshot, map_rating)
+                        for map_rating in snapshot.get("map_ratings") or []
+                        if map_rating.get("ratings")
+                    )
                 else:
                     already_watching += 1
             except OSError as e:
@@ -504,7 +510,7 @@ class HltvPlugin(Star):
                 logger.warning(f"[hltv] 保存直播订阅失败: {e!r}")
         if watched:
             self._ensure_live_watch_task()
-        return watched, already_watching, failures
+        return watched, already_watching, failures, missed_ratings
 
     def _subscribe_upcoming_matches(
         self,
@@ -667,7 +673,7 @@ class HltvPlugin(Star):
                 )
                 return
             selected = [shown[index - 1] for index in indexes]
-            watched, already_watching, failures = (
+            watched, already_watching, failures, missed_ratings = (
                 await self._subscribe_live_matches(event, selected, len(selected))
             )
             lines = []
@@ -689,7 +695,18 @@ class HltvPlugin(Star):
                 lines.append(
                     "每张地图结束后会推送该图 Rating；新地图开始和整场完赛时也会 @ 你。"
                 )
+                if missed_ratings:
+                    lines.append("已打完的地图 Rating 随后发出。")
             yield event.plain_result("\n".join(lines))
+            for snapshot, map_rating in missed_ratings:
+                yield await self._image_or_text(
+                    event,
+                    render_rating_card,
+                    formatter.format_map_rating(snapshot, map_rating),
+                    snapshot,
+                    map_rating=map_rating,
+                    log_name="订阅补发 Rating 卡片",
+                )
             return
         if tip := self._waiting_tip(event, HOME_LIVE_KEY):
             yield tip
@@ -714,7 +731,7 @@ class HltvPlugin(Star):
             except HltvError as e:
                 yield event.plain_result(str(e))
                 return
-            watched, already_watching, subscription_failures = (
+            watched, already_watching, subscription_failures, missed_ratings = (
                 await self._subscribe_live_matches(event, mine, 2, detailed=True)
             )
             if mine:
@@ -745,6 +762,15 @@ class HltvPlugin(Star):
                     footer=footer,
                     log_name="单场直播详情卡片",
                 )
+                for snapshot, map_rating in missed_ratings:
+                    yield await self._image_or_text(
+                        event,
+                        render_rating_card,
+                        formatter.format_map_rating(snapshot, map_rating),
+                        snapshot,
+                        map_rating=map_rating,
+                        log_name="订阅补发 Rating 卡片",
+                    )
             else:
                 text = formatter.format_team_not_live(name, upcoming)
                 if upcoming:

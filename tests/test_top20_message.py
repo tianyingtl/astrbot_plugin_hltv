@@ -651,6 +651,102 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
                 ["1", "3", "2"],
             )
 
+    async def test_mid_match_subscription_sends_completed_map_rating(self):
+        module = _load_main_module()
+        match = {
+            "id": "77",
+            "url": "https://www.hltv.org/matches/77/spirit-liquid",
+            "team1": "Spirit",
+            "team2": "Liquid",
+            "event": "Test Event",
+            "rating": 3,
+            "live": True,
+        }
+        snapshot = {
+            "status": "live",
+            "best_of": "BO3",
+            "active_map_index": 2,
+            "current_map_name": "Ancient",
+            "current_score": "5:4",
+            "maps_score": "1:0",
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "score": "13:7",
+                    "ratings": [
+                        {"team": "Spirit", "players": [{"nickname": "donk", "rating": "1.50"}]}
+                    ],
+                }
+            ],
+        }
+
+        class Client:
+            async def get_live_matches(self, min_stars=0):
+                return [dict(match)]
+
+            async def get_live_snapshot(self, item):
+                return dict(snapshot)
+
+        class Event:
+            unified_msg_origin = "group:1"
+
+            def __init__(self, message):
+                self.message_str = message
+
+            @staticmethod
+            def get_sender_id():
+                return "42"
+
+            @staticmethod
+            def get_sender_name():
+                return "Chiaki"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+            @staticmethod
+            def image_result(path):
+                return ("image", path)
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.send_waiting_tip = False
+        plugin.min_stars = 0
+        plugin.event_keywords = []
+        plugin._live_selection_cache = {}
+        plugin._ensure_live_watch_task = lambda: None
+
+        with tempfile.TemporaryDirectory() as temp:
+            plugin.live_subscriptions = module.LiveSubscriptionStore(
+                Path(temp) / "subscriptions.json"
+            )
+            with patch.object(
+                module, "render_live_card", return_value=Path("live.png")
+            ):
+                [result async for result in plugin.live(Event("/hltv live"))]
+
+            with patch.object(
+                module, "render_rating_card", return_value=Path("map-1.png")
+            ) as render:
+                subscribed = [
+                    result async for result in plugin.live(Event("/hltv live 1"))
+                ]
+                subscribed_again = [
+                    result async for result in plugin.live(Event("/hltv live 1"))
+                ]
+
+        self.assertEqual(len(subscribed), 2)
+        self.assertIn("已打完的地图 Rating 随后发出", subscribed[0])
+        self.assertEqual(subscribed[1], ("image", "map-1.png"))
+        self.assertEqual(render.call_count, 1)
+        self.assertEqual(render.call_args.kwargs["map_rating"]["index"], 1)
+        self.assertEqual(len(subscribed_again), 1)
+        self.assertNotIn("已打完的地图 Rating", subscribed_again[0])
+        item = plugin.live_subscriptions.all()[0]
+        self.assertEqual(item["sent_map_ratings"], [1])
+
     async def test_live_team_uses_detail_snapshot_and_single_detail_card(self):
         module = _load_main_module()
         match = {
