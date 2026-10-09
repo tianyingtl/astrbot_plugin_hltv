@@ -733,6 +733,194 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rendered["live_stats"]), 2)
         self.assertEqual(len(plugin.live_subscriptions.all()), 1)
 
+    async def test_rating_command_lists_matches_and_selects_map_by_two_indexes(self):
+        module = _load_main_module()
+        live_match = {
+            "id": "123",
+            "url": "https://www.hltv.org/matches/123/spirit-flyquest",
+            "team1": "Spirit",
+            "team2": "FlyQuest",
+            "event": "Live Event",
+            "live": True,
+        }
+        finished_match = {
+            "id": "122",
+            "url": "https://www.hltv.org/matches/122/spirit-mongolz",
+            "team1": "Spirit",
+            "team2": "The MongolZ",
+            "event": "Finished Event",
+            "date": "08-10-2026",
+            "score1": 2,
+            "score2": 1,
+        }
+        snapshot = {
+            "status": "live",
+            "team1": "Spirit",
+            "team2": "FlyQuest",
+            "event": "Live Event",
+            "best_of": "BO3",
+            "maps": [
+                {"map": "Nuke", "ordinal": 1},
+                {"map": "Ancient", "ordinal": 2},
+                {"map": "Mirage", "ordinal": 3},
+            ],
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "score": "13:7",
+                    "ratings": [
+                        {"team": "Spirit", "players": [{"nickname": "donk", "rating": "1.50"}]}
+                    ],
+                },
+                {
+                    "index": 2,
+                    "map": "Ancient",
+                    "score": "8:13",
+                    "ratings": [
+                        {"team": "Spirit", "players": [{"nickname": "donk", "rating": "1.10"}]}
+                    ],
+                },
+            ],
+        }
+
+        class Client:
+            get_match_snapshot = AsyncMock(return_value=snapshot)
+
+            async def get_live_matches(self):
+                return [live_match]
+
+            async def get_results(self, days=1):
+                if days != 7:
+                    raise AssertionError(f"expected 7 days, got {days}")
+                return [finished_match]
+
+        class Store:
+            def all(self):
+                return [
+                    {
+                        "match_id": "123",
+                        "url": live_match["url"],
+                        "team1": "Spirit",
+                        "team2": "FlyQuest",
+                        "event": "Live Event",
+                    }
+                ]
+
+        class Event:
+            unified_msg_origin = "group:1"
+
+            def __init__(self, message):
+                self.message_str = message
+
+            @staticmethod
+            def get_sender_id():
+                return "42"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+            @staticmethod
+            def image_result(path):
+                return ("image", path)
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.live_subscriptions = Store()
+        plugin.max_items = 5
+        plugin._rating_selection_cache = {}
+
+        results = [result async for result in plugin.rating(Event("/hltv rating Spirit"))]
+        self.assertIn("1. [追踪中] Spirit vs FlyQuest", results[0])
+        self.assertIn("2. [已结束] Spirit 2:1 The MongolZ", results[0])
+        self.assertIn("/hltv rating Spirit 比赛序号 地图序号", results[0])
+
+        with patch.object(
+            module, "render_rating_card", return_value=Path("map-1.png")
+        ) as render:
+            results = [
+                result
+                async for result in plugin.rating(Event("/hltv rating Spirit 1 1"))
+            ]
+
+        self.assertEqual(results, [("image", "map-1.png")])
+        self.assertEqual(render.call_args.kwargs["map_rating"]["index"], 1)
+        plugin.client.get_match_snapshot.assert_awaited_with("123", live_match["url"])
+
+    async def test_rating_shorthand_and_bo1_return_one_card(self):
+        module = _load_main_module()
+        snapshot = {
+            "status": "finished",
+            "team1": "Team A",
+            "team2": "Team B",
+            "event": "BO1 Event",
+            "best_of": "BO1",
+            "maps": [{"map": "Nuke", "ordinal": 1}],
+            "map_ratings": [
+                {
+                    "index": 1,
+                    "map": "Nuke",
+                    "score": "13:9",
+                    "ratings": [{"team": "Team A", "players": [{"nickname": "a"}]}],
+                }
+            ],
+            "ratings": [{"team": "Team A", "players": [{"nickname": "a"}]}],
+        }
+
+        class Client:
+            get_match_snapshot = AsyncMock(return_value=snapshot)
+
+            async def get_live_matches(self):
+                return []
+
+            async def get_results(self, days=1):
+                return [
+                    {
+                        "id": "900",
+                        "url": "https://www.hltv.org/matches/900/a-b",
+                        "team1": "Team A",
+                        "team2": "Team B",
+                        "event": "BO1 Event",
+                        "date": "08-10-2026",
+                        "score1": 1,
+                        "score2": 0,
+                    }
+                ]
+
+        class Event:
+            unified_msg_origin = "group:1"
+
+            def __init__(self, message):
+                self.message_str = message
+
+            @staticmethod
+            def get_sender_id():
+                return "42"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+            @staticmethod
+            def image_result(path):
+                return ("image", path)
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.live_subscriptions = types.SimpleNamespace(all=lambda: [])
+        plugin.max_items = 5
+        plugin._rating_selection_cache = {}
+
+        with patch.object(module, "render_rating_card", return_value=Path("bo1.png")):
+            [result async for result in plugin.rating(Event("/hltv rating Team A"))]
+            results = [result async for result in plugin.rating(Event("/hltv rating 1"))]
+
+        self.assertEqual(results, [("image", "bo1.png")])
+        plugin.client.get_match_snapshot.assert_awaited_with(
+            "900", "https://www.hltv.org/matches/900/a-b"
+        )
+
     async def test_plain_live_only_lists_active_matches_without_subscribing(self):
         module = _load_main_module()
 

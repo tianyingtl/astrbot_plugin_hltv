@@ -11,6 +11,7 @@
 | 比赛中心 | 今日赛程、近期比赛、实时比分、历史赛果、近期赛事 |
 | 直播追踪 | 当前地图比分、系列赛比分、BO3/BO5 选图、双方十人实时战绩 |
 | 比赛提醒 | 首图开赛、新地图开始、逐图 Rating、整场完赛 Rating |
+| Rating 回看 | 按战队列出近 7 天比赛，可指定比赛序号和地图序号主动查看 |
 | 战队资料 | Valve/HLTV 排名、阵容、教练、Major 冠军、奖杯、近期战绩 |
 | 选手资料 | 当前 Rating、TOP20 排名、Major、冠军与 MVP 荣誉 |
 | 排名与榜单 | Valve VRS 全球/地区排名、HLTV 世界排名、年度 TOP20 |
@@ -64,6 +65,7 @@ pip install -r requirements.txt
 | 查看当前直播 | `/live` 或 `/hltv live` |
 | 订阅直播列表中的比赛 | `/hltv live 1 2 3` |
 | 查看并订阅指定战队 | `/hltv live <战队>` |
+| 回看某队比赛 Rating | `/hltv rating <战队> [比赛序号] [地图序号]` |
 | 调整当前赛事防剧透延迟 | `/hltv 防剧透 <数字>`（与 `antijutou` 为同一命令） |
 | 查看今日赛程 | `/hltv today` |
 | 查看近期赛果 | `/hltv results [天数]` |
@@ -117,6 +119,13 @@ pip install -r requirements.txt
 
 使用 `/hltv live 取消` 可以取消当前账号在当前会话中的全部直播提醒。
 
+### 回看 Rating
+
+`/hltv rating <战队>` 会优先列出正在追踪的比赛，再列出近 7 天已结束场次。
+`/hltv rating Spirit 1` 查看第 1 场全部已同步 Rating；`/hltv rating Spirit 1 1`
+只看第 1 场第 1 图。比赛中也能回看已经打完的地图，不必等自动推送。
+列表生成后 5 分钟内支持简写 `/hltv rating 1` 和 `/hltv rating 1 1`。
+
 ## 完整指令
 
 ### 比赛
@@ -129,6 +138,9 @@ pip install -r requirements.txt
 | `/hltv live 1 2 3` | 按直播卡片序号批量订阅 |
 | `/hltv live <战队>` | 查看该队赛中详情，或订阅今日待开赛比赛 |
 | `/hltv live 取消` | 取消当前会话中的直播提醒 |
+| `/hltv rating <战队>` | 列出该队当前追踪与近 7 天可回看 Rating 的比赛 |
+| `/hltv rating <战队> <比赛序号>` | 查看指定比赛全部已同步 Rating |
+| `/hltv rating <战队> <比赛序号> <地图序号>` | 只查看指定比赛的某一张地图 |
 | `/hltv 防剧透 <数字>`、`/hltv antijutou <数字>` | 同一命令；自动识别当前直播大赛，单位默认分钟 |
 | `/hltv results [天数]` | 近期赛果，最多 7 天 |
 | `/hltv events` | 近期赛事列表 |

@@ -1,5 +1,12 @@
 # 更新日志
 
+## v3.0.5
+
+- 新增 `/hltv rating <战队>`，按战队列出当前追踪和近 7 天可回看 Rating 的比赛。
+- 支持比赛序号与地图序号两级选择：`/hltv rating Spirit 1` 查看整场，`/hltv rating Spirit 1 1` 只看第 1 图。
+- 比赛进行中也可主动回看已打完地图的 HLTV Rating，不再只能等待订阅推送。
+- 列表生成后 5 分钟内支持 `/hltv rating 1` 与 `/hltv rating 1 1` 简写；BO1 手动回看仍只发送一张 Rating 卡。
+
 ## v3.0.4
 
 - 新增 `query_hltv` 大模型工具，普通对话中的 CS 赛事问题可优先查询插件资料后回答。

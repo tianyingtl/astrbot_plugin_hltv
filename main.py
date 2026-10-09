@@ -73,6 +73,7 @@ _KNOWN_SUBCOMMANDS = {
     "events", "赛事",
     "team", "战队",
     "player", "选手",
+    "rating", "评分",
     "news", "新闻",
     "sub", "订阅",
     "unsub", "退订", "取消订阅",
@@ -111,6 +112,9 @@ class HltvPlugin(Star):
         self.live_subscriptions = LiveSubscriptionStore()
         self.spoiler_delays = SpoilerDelayStore()
         self._live_selection_cache: dict[tuple[str, str], tuple[int, list[dict]]] = {}
+        self._rating_selection_cache: dict[
+            tuple[str, str], tuple[int, str, list[dict]]
+        ] = {}
 
         self.client = HltvClient(
             proxy_list=[p for p in (config.get("proxy_list") or []) if p],
@@ -323,6 +327,124 @@ class HltvPlugin(Star):
         if not tokens or not all(token.isdigit() for token in tokens):
             return None
         return list(dict.fromkeys(int(token) for token in tokens))
+
+    @staticmethod
+    def _parse_rating_query(value: str) -> tuple[str, int, int]:
+        """解析 /hltv rating <战队> [比赛序号] [地图序号]。"""
+        tokens = str(value or "").split()
+        match_index = map_index = 0
+        if tokens and tokens[-1].isdigit():
+            map_index = int(tokens.pop())
+            if tokens and tokens[-1].isdigit():
+                match_index = int(tokens.pop())
+            else:
+                match_index, map_index = map_index, 0
+        return " ".join(tokens).strip(), match_index, map_index
+
+    async def _collect_rating_matches(self, name: str) -> list[dict]:
+        candidates: list[dict] = []
+        seen: set[str] = set()
+
+        def append(match: dict, source: str):
+            match_id = str(match.get("id") or match.get("match_id") or "")
+            url = str(match.get("url") or "")
+            if not match_id or not url:
+                return
+            if match_id in seen:
+                return
+            seen.add(match_id)
+            candidates.append(
+                {
+                    "id": match_id,
+                    "url": url,
+                    "team1": str(match.get("team1") or "?"),
+                    "team2": str(match.get("team2") or "?"),
+                    "score1": match.get("score1", ""),
+                    "score2": match.get("score2", ""),
+                    "maps_score": str(match.get("maps_score") or ""),
+                    "event": str(match.get("event") or ""),
+                    "date": str(match.get("date") or ""),
+                    "source": source,
+                }
+            )
+
+        subscriptions = getattr(self, "live_subscriptions", None)
+        for item in (subscriptions.all() if subscriptions else []):
+            if not item.get("pending_start") and self._team_query_match(name, item):
+                append(item, "subscription")
+
+        errors: list[HltvError] = []
+        try:
+            for match in await self.client.get_live_matches():
+                if self._team_query_match(name, match):
+                    append(match, "live")
+        except HltvError as e:
+            errors.append(e)
+        try:
+            for match in await self.client.get_results(days=7):
+                if self._team_query_match(name, match):
+                    append(match, "result")
+        except HltvError as e:
+            if not candidates and errors:
+                raise errors[0]
+            if not candidates:
+                raise e
+
+        limit = self.max_items if self.max_items > 0 else len(candidates)
+        return candidates[:limit]
+
+    @staticmethod
+    def _format_rating_matches(name: str, matches: list[dict]) -> str:
+        lines = [f"📊 {name} 近 7 天可回看 Rating 的比赛"]
+        for index, match in enumerate(matches, start=1):
+            status = {
+                "subscription": "追踪中",
+                "live": "LIVE",
+                "result": "已结束",
+            }.get(str(match.get("source")), "已结束")
+            if match.get("maps_score"):
+                score = str(match["maps_score"])
+            else:
+                score = (
+                    f"{match.get('score1', '?')}:{match.get('score2', '?')}"
+                    if str(match.get("score1", "")).strip()
+                    else "vs"
+                )
+            date = f"  {match['date']}" if match.get("date") else ""
+            lines.append(
+                f"{index}. [{status}] {match['team1']} {score} {match['team2']}"
+                f"{date}\n   {match.get('event') or '赛事未知'}"
+            )
+        lines.append(
+            f"\n查看某场全部 Rating：/hltv rating {name} 比赛序号\n"
+            f"只看某场某一图：/hltv rating {name} 比赛序号 地图序号\n"
+            "也可以直接发送：/hltv rating 比赛序号 [地图序号]"
+        )
+        return "\n".join(lines)
+
+    def _remember_rating_selection(
+        self, event: AstrMessageEvent, name: str, matches: list[dict]
+    ) -> None:
+        user_id = self._sender_id(event)
+        umo = str(getattr(event, "unified_msg_origin", ""))
+        if user_id and umo:
+            self._rating_selection_cache[(umo, user_id)] = (
+                int(time()),
+                name,
+                [dict(match) for match in matches],
+            )
+
+    def _get_rating_selection(self, event: AstrMessageEvent) -> tuple[str, list[dict]]:
+        user_id = self._sender_id(event)
+        umo = str(getattr(event, "unified_msg_origin", ""))
+        cached = self._rating_selection_cache.get((umo, user_id))
+        if cached is None:
+            return "", []
+        created_at, name, matches = cached
+        if int(time()) - created_at > 5 * 60:
+            self._rating_selection_cache.pop((umo, user_id), None)
+            return "", []
+        return name, [dict(match) for match in matches]
 
     def _remember_live_selection(
         self, event: AstrMessageEvent, matches: list[dict]
@@ -684,6 +806,130 @@ class HltvPlugin(Star):
                 fallback,
                 [],
                 log_name="直播卡片",
+            )
+
+    @hltv.command("rating", alias={"评分"})
+    async def rating(self, event: AstrMessageEvent, name: str = ""):
+        """按战队回看近期比赛 Rating；两个序号分别是比赛和地图"""
+        raw = self._rest_after(event, {"rating", "评分"}, name)
+        team_name, match_index, map_index = self._parse_rating_query(raw)
+        if not raw:
+            yield event.plain_result(
+                "用法：/hltv rating <战队> [比赛序号] [地图序号]\n"
+                "先列比赛，再用序号回看；例如 /hltv rating Spirit 1 1 表示第 1 场第 1 图。"
+            )
+            return
+        if match_index < 0 or map_index < 0:
+            yield event.plain_result("比赛序号和地图序号都必须是正整数。")
+            return
+
+        if team_name:
+            try:
+                matches = await self._collect_rating_matches(team_name)
+            except HltvError as e:
+                yield event.plain_result(str(e))
+                return
+            if not matches:
+                yield event.plain_result(
+                    f"「{team_name}」近 7 天没有找到可回看 Rating 的比赛。"
+                )
+                return
+            self._remember_rating_selection(event, team_name, matches)
+        else:
+            team_name, matches = self._get_rating_selection(event)
+            if not matches:
+                yield event.plain_result(
+                    "评分序号已过期或尚未生成，请先发送 /hltv rating 战队名。"
+                )
+                return
+
+        if not 1 <= match_index <= len(matches):
+            if match_index == 0 and map_index == 0 and not raw.split()[-1].isdigit():
+                yield event.plain_result(self._format_rating_matches(team_name, matches))
+                return
+            yield event.plain_result(
+                f"比赛序号范围是 1-{len(matches)}。\n"
+                f"可重新列表：/hltv rating {team_name}"
+            )
+            return
+        selected = matches[match_index - 1]
+        try:
+            snapshot = await self.client.get_match_snapshot(
+                selected["id"], selected["url"]
+            )
+        except HltvError as e:
+            yield event.plain_result(str(e))
+            return
+
+        map_ratings = list(snapshot.get("map_ratings") or [])
+        available = {
+            int(item.get("index") or 0)
+            for item in map_ratings
+            if int(item.get("index") or 0) > 0 and item.get("ratings")
+        }
+        if map_index:
+            map_total = len(snapshot.get("maps") or []) or len(map_ratings)
+            if not 1 <= map_index <= map_total:
+                yield event.plain_result(f"这场比赛只有 1-{map_total} 张地图。")
+                return
+            chosen = next(
+                (item for item in map_ratings if int(item.get("index") or 0) == map_index),
+                None,
+            )
+            if chosen is None or not chosen.get("ratings"):
+                ready = ", ".join(str(index) for index in sorted(available)) or "暂无"
+                yield event.plain_result(
+                    f"HLTV 还没同步第 {map_index} 图 Rating。\n"
+                    f"当前可看：第 {ready} 图"
+                )
+                return
+            yield await self._image_or_text(
+                event,
+                render_rating_card,
+                formatter.format_map_rating(snapshot, chosen),
+                snapshot,
+                map_rating=chosen,
+                log_name="单图 Rating 卡片",
+            )
+            return
+
+        if not map_ratings and not snapshot.get("ratings"):
+            yield event.plain_result(
+                "这场比赛的 HLTV Rating 还没同步，稍后再试。"
+            )
+            return
+
+        best_of = str(snapshot.get("best_of") or "").upper()
+        if best_of == "BO1" and map_ratings:
+            chosen = map_ratings[0]
+            yield await self._image_or_text(
+                event,
+                render_rating_card,
+                formatter.format_map_rating(snapshot, chosen),
+                snapshot,
+                map_rating=chosen,
+                log_name="BO1 Rating 卡片",
+            )
+            return
+
+        for chosen in map_ratings:
+            if not chosen.get("ratings"):
+                continue
+            yield await self._image_or_text(
+                event,
+                render_rating_card,
+                formatter.format_map_rating(snapshot, chosen),
+                snapshot,
+                map_rating=chosen,
+                log_name="单图 Rating 卡片",
+            )
+        if snapshot.get("status") == "finished" and snapshot.get("ratings"):
+            yield await self._image_or_text(
+                event,
+                render_rating_card,
+                formatter.format_match_finished(snapshot),
+                snapshot,
+                log_name="整场 Rating 卡片",
             )
 
     @hltv.command("results", alias={"赛果", "结果"})
@@ -1087,6 +1333,8 @@ class HltvPlugin(Star):
             handler = self.team(event)
         elif sub in ("player", "选手"):
             handler = self.player(event)
+        elif sub in ("rating", "评分"):
+            handler = self.rating(event)
         elif sub in ("news", "新闻"):
             handler = self.news(event, index=_int_arg())
         elif sub in ("antijutou", "防剧透"):

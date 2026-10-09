@@ -532,6 +532,7 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv events — 近期赛事
 /hltv team <名称> — 战队详情图片卡（支持缩写、中文称呼）
 /hltv player <昵称> — 选手生涯荣誉图片卡
+/hltv rating <战队> [比赛序号] [地图序号] — 回看近期比赛逐图/全场 Rating
 /hltv news [序号] — 今日新闻（中英双语标题，带序号看详情）
 /hltv sub — 在本会话订阅每日赛程推送（unsub 退订）
 /hltv help — 显示本帮助
