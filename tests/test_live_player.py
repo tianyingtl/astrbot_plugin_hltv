@@ -261,6 +261,73 @@ class EventStatsTests(unittest.TestCase):
             1.0,
         )
 
+    def test_default_event_prefers_current_s_tier_event(self):
+        selected = HltvClient._select_default_event_candidate(
+            [
+                {
+                    "tt_id": "csgo_tt_1",
+                    "title": "Current S Tier",
+                    "grade": "7",
+                    "status": "live",
+                    "end_date": "2026-10-20 23:59:59",
+                },
+                {
+                    "tt_id": "csgo_tt_2",
+                    "title": "Current A+ Tier",
+                    "grade": "3",
+                    "status": "live",
+                    "end_date": "2026-10-22 23:59:59",
+                },
+                {
+                    "tt_id": "csgo_tt_3",
+                    "title": "Recent S Tier",
+                    "grade": "2",
+                    "status": "past",
+                    "end_date": "2026-10-19 04:59:59",
+                },
+            ],
+            "2026-10-19 18:00:00",
+        )
+
+        self.assertEqual(selected["tt_id"], "csgo_tt_1")
+
+    def test_default_event_falls_back_to_latest_finished_s_tier(self):
+        selected = HltvClient._select_default_event_candidate(
+            [
+                {
+                    "tt_id": "csgo_tt_1",
+                    "title": "Current A+ Tier",
+                    "grade": "3",
+                    "status": "live",
+                    "end_date": "2026-10-22 23:59:59",
+                },
+                {
+                    "tt_id": "csgo_tt_2",
+                    "title": "Future S Tier",
+                    "grade": "2",
+                    "status": "upcoming",
+                    "end_date": "2026-11-08 23:59:59",
+                },
+                {
+                    "tt_id": "csgo_tt_3",
+                    "title": "Older S Tier",
+                    "grade": "2",
+                    "status": "past",
+                    "end_date": "2026-09-21 03:59:59",
+                },
+                {
+                    "tt_id": "csgo_tt_4",
+                    "title": "Thunderpick World Championship 2026",
+                    "grade": "2",
+                    "status": "past",
+                    "end_date": "2026-10-19 04:59:59",
+                },
+            ],
+            "2026-10-19 18:00:00",
+        )
+
+        self.assertEqual(selected["tt_id"], "csgo_tt_4")
+
     def test_text_keeps_selected_player_outside_top_n(self):
         result = self._result()
         text = format_event_player_stats(result, 2, "beastik")

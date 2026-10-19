@@ -168,7 +168,7 @@ pip install -r requirements.txt
 | `/hltv player <昵称>` | 选手资料、Rating、TOP20、冠军与 MVP |
 | `/hltv top20 [年份]` | 年度 TOP20 总榜；不填年份时查询上一年 |
 | `/hltv top20 <年份> <名次>` | 指定名次的新闻内容和个人 TOP 图片 |
-| `/hltv stats` | 当前赛事选手数据榜 |
+| `/hltv stats` | 当前大赛选手数据榜；无进行中大赛时读取最近结束大赛 |
 | `/hltv stats <赛事>` | 指定赛事选手数据榜 |
 | `/hltv stats <赛事> <选手>` | 指定赛事中定位某名选手 |
 
@@ -204,7 +204,8 @@ CS 职业比赛、赛程、赛果、排名、赛事、战队、选手、新闻�
 
 ## 赛事选手数据
 
-`/hltv stats` 会自动选择当前进行中的赛事；`/hltv stats IEM Cologne NiKo`
+`/hltv stats` 会自动选择当前进行中的 S 级大赛；没有进行中的 S 级大赛时，
+读取最近结束的 S 级大赛。`/hltv stats IEM Cologne NiKo`
 会先匹配赛事，再在榜单中高亮 NiKo。只输入选手名时，例如 `/hltv stats donk`，
 会在当前赛事中定位该选手。
 

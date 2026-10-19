@@ -80,7 +80,11 @@ _FIVEE_ARTICLE_HOSTS = {"csgo.5eplay.com", "www.5eplay.com"}
 _FIVEE_IMAGE_HOSTS = {"oss.5eplay.com", "static.5eplay.com"}
 _TOP20_IMAGE_HOSTS = _HLTV_TOP20_IMAGE_HOSTS | _FIVEE_IMAGE_HOSTS
 _FIVEE_EVENT_SEARCH_URL = "https://ya-api-app.5eplay.com/v1/search/tournament"
+_FIVEE_EVENT_LIST_URL = (
+    "https://esports-data.5eplaycdn.com/v1/api/csgo/mfilter/tournament/search"
+)
 _FIVEE_EVENT_DATA_URL = "https://esports-data.5eplaycdn.com/v1/api/csgo/tournaments"
+_FIVEE_MAJOR_GRADES = {"1", "2", "7"}
 
 _FIVEE_TOP20_POSTERS = {
     2013: (
@@ -2104,31 +2108,119 @@ class HltvClient:
 
         return await self._cached_locked(f"event_stats_search:{query.lower()}", fetch)
 
-    async def current_event_stats_candidate(self) -> dict:
-        events = await self.get_events()
-        if not events:
-            raise HltvError("HLTV 近期赛事列表为空。")
-        now = self._now_local()
-        ongoing = []
-        for item in events:
-            try:
-                start = datetime.strptime(
-                    f"{item.get('start_date')}-{now.year}", "%d-%m-%Y"
-                )
-                end = datetime.strptime(f"{item.get('end_date')}-{now.year}", "%d-%m-%Y")
-            except (TypeError, ValueError):
-                continue
-            if start.date() <= now.date() <= end.date():
-                ongoing.append(item)
-        selected = ongoing[0] if ongoing else events[0]
+    @staticmethod
+    def _parse_5e_event_ids(data: dict) -> list[str]:
+        items = ((data.get("data") or {}).get("items") or [])
+        return list(
+            dict.fromkeys(
+                str(item.get("tt_id") or "")
+                for item in items
+                if str(item.get("tt_id") or "").startswith("csgo_tt_")
+            )
+        )
+
+    @staticmethod
+    def _parse_5e_event_introduction(data: dict) -> dict | None:
+        basic = ((data.get("data") or {}).get("basic") or {})
+        tt_id = str(basic.get("tt_id") or "")
+        title = HltvClient._clean_5e_title(basic.get("name_en"))
+        if not re.fullmatch(r"csgo_tt_\d+", tt_id) or not title:
+            return None
         return {
-            "tt_id": f"csgo_tt_{selected['id']}",
-            "title": str(selected.get("title") or ""),
-            "title_zh": "",
-            "start_date": str(selected.get("start_date") or ""),
-            "end_date": str(selected.get("end_date") or ""),
-            "status": "ongoing" if ongoing else "",
+            "tt_id": tt_id,
+            "title": title,
+            "title_zh": HltvClient._clean_5e_title(basic.get("name_zh")),
+            "start_date": str(basic.get("start_time") or ""),
+            "end_date": str(basic.get("end_time") or ""),
+            "status": str(basic.get("status") or ""),
+            "grade": str(basic.get("grade") or ""),
         }
+
+    async def _fetch_5e_event_introductions(self, tt_ids: list[str]) -> list[dict]:
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        headers = {
+            **_BROWSER_HEADERS,
+            "referer": "https://event.5eplay.com/csgo/events",
+            "accept": "application/json, text/plain, */*",
+        }
+
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+
+            async def fetch_one(tt_id: str) -> dict | None:
+                url = f"{_FIVEE_EVENT_DATA_URL}/{tt_id}/introduction"
+                try:
+                    async with session.get(
+                        url, proxy=self._proxy_list[0] if self._proxy_list else None
+                    ) as response:
+                        if response.status != 200:
+                            raise HltvError(
+                                f"赛事数据接口请求失败（HTTP {response.status}）。"
+                            )
+                        data = await response.json(content_type=None)
+                except HltvError:
+                    raise
+                except (
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                    OSError,
+                    ValueError,
+                ) as e:
+                    raise HltvError("赛事数据接口请求失败，请稍后重试。") from e
+                if not isinstance(data, dict) or not data.get("success"):
+                    raise HltvError(str(data.get("message") or "赛事数据接口返回异常。"))
+                return self._parse_5e_event_introduction(data)
+
+            results = await asyncio.gather(*(fetch_one(tt_id) for tt_id in tt_ids))
+            return [item for item in results if item]
+
+    @staticmethod
+    def _select_default_event_candidate(candidates: list[dict], now: str) -> dict | None:
+        # 5E 前端筛选中，S 级赛事的 grade ID 为 1、2、7。
+        majors = [
+            item
+            for item in candidates
+            if str(item.get("grade") or "") in _FIVEE_MAJOR_GRADES
+        ]
+        ongoing = [
+            item
+            for item in majors
+            if str(item.get("status") or "").lower() in {"live", "ongoing"}
+        ]
+        if ongoing:
+            return max(ongoing, key=lambda item: str(item.get("end_date") or ""))
+        recent = [
+            item
+            for item in majors
+            if str(item.get("status") or "").lower() == "past"
+            and str(item.get("end_date") or "") <= now
+        ]
+        return (
+            max(recent, key=lambda item: str(item.get("end_date") or ""))
+            if recent
+            else None
+        )
+
+    async def current_event_stats_candidate(self) -> dict:
+        async def fetch() -> dict:
+            tt_ids: list[str] = []
+            for page in range(1, 6):
+                data = await self._fetch_5e_json(
+                    f"{_FIVEE_EVENT_LIST_URL}?limit=20&page={page}"
+                )
+                tt_ids.extend(
+                    tt_id
+                    for tt_id in self._parse_5e_event_ids(data)
+                    if tt_id not in tt_ids
+                )
+            candidates = await self._fetch_5e_event_introductions(tt_ids)
+            selected = self._select_default_event_candidate(
+                candidates, self._now_local().strftime("%Y-%m-%d %H:%M:%S")
+            )
+            if selected is None:
+                raise HltvError("暂未找到正在进行或最近结束的 S 级赛事。")
+            return selected
+
+        return await self._cached_locked("event_stats_default", fetch)
 
     @staticmethod
     def _parse_event_player_stats(
