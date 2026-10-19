@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import difflib
 import hashlib
 import json
 import re
@@ -78,6 +79,8 @@ _HLTV_TOP20_IMAGE_HOSTS = {
 _FIVEE_ARTICLE_HOSTS = {"csgo.5eplay.com", "www.5eplay.com"}
 _FIVEE_IMAGE_HOSTS = {"oss.5eplay.com", "static.5eplay.com"}
 _TOP20_IMAGE_HOSTS = _HLTV_TOP20_IMAGE_HOSTS | _FIVEE_IMAGE_HOSTS
+_FIVEE_EVENT_SEARCH_URL = "https://ya-api-app.5eplay.com/v1/search/tournament"
+_FIVEE_EVENT_DATA_URL = "https://esports-data.5eplaycdn.com/v1/api/csgo/tournaments"
 
 _FIVEE_TOP20_POSTERS = {
     2013: (
@@ -1985,6 +1988,213 @@ class HltvClient:
 
     async def get_events(self) -> list[dict]:
         return await self._call("get_events", cache_key=EVENTS_KEY)
+
+    async def _fetch_5e_json(self, url: str) -> dict:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in {
+            "ya-api-app.5eplay.com",
+            "esports-data.5eplaycdn.com",
+        }:
+            raise HltvError("赛事数据接口地址无效。")
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        headers = {
+            **_BROWSER_HEADERS,
+            "referer": "https://event.5eplay.com/csgo/events",
+            "accept": "application/json, text/plain, */*",
+        }
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(url, proxy=self._proxy_list[0] if self._proxy_list else None) as response:
+                    if response.status != 200:
+                        raise HltvError(f"赛事数据接口请求失败（HTTP {response.status}）。")
+                    data = await response.json(content_type=None)
+        except HltvError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as e:
+            raise HltvError("赛事数据接口请求失败，请稍后重试。") from e
+        if not isinstance(data, dict) or not data.get("success"):
+            raise HltvError(str(data.get("message") or "赛事数据接口返回异常。"))
+        return data
+
+    @staticmethod
+    def _clean_5e_title(value: Any) -> str:
+        return re.sub(r"<[^>]+>|</[^>]+>", "", str(value or "")).strip()
+
+    @staticmethod
+    def _stats_text(value: Any) -> str:
+        text = str(value or "").lower()
+        text = re.sub(r"第\s*(\d+)\s*季", r"season\1", text)
+        text = re.sub(r"\bs\s*(\d+)\b", r"season\1", text)
+        return re.sub(r"[^\w\u3400-\u9fff]+", "", text)
+
+    @classmethod
+    def _stats_event_score(cls, query: str, candidate: dict) -> float:
+        needle = cls._stats_text(query)
+        titles = [
+            cls._stats_text(candidate.get("title")),
+            cls._stats_text(candidate.get("title_zh")),
+        ]
+        if not needle:
+            return 0.0
+        if any(needle == title for title in titles if title):
+            return 1.0
+        contained = [
+            difflib.SequenceMatcher(None, needle, title).ratio()
+            for title in titles
+            if title and needle in title
+        ]
+        if contained:
+            return max([0.82, *contained])
+        return max(
+            difflib.SequenceMatcher(None, needle, title).ratio()
+            for title in titles
+            if title
+        )
+
+    @staticmethod
+    def _parse_5e_event_candidates(data: dict) -> list[dict]:
+        tournaments = ((data.get("data") or {}).get("tournaments") or [])
+        candidates = []
+        for item in tournaments:
+            if str(item.get("game_type") or "").lower() != "cs":
+                continue
+            tt_id = str(item.get("tt_id") or item.get("obj_id") or "")
+            title = HltvClient._clean_5e_title(item.get("name") or item.get("disp_name"))
+            if not tt_id.startswith("csgo_tt_") or not title:
+                continue
+            candidates.append(
+                {
+                    "tt_id": tt_id,
+                    "title": title,
+                    "title_zh": HltvClient._clean_5e_title(item.get("disp_name")),
+                    "start_date": str(item.get("start_time") or ""),
+                    "end_date": str(item.get("end_time") or ""),
+                    "status": str(item.get("tt_status") or ""),
+                }
+            )
+        return candidates
+
+    async def find_event_stats_candidates(self, query: str) -> list[dict]:
+        query = str(query or "").strip()
+        if not query:
+            return []
+        tokens = query.split()
+        search_terms = [query] + ([tokens[0]] if len(tokens[0]) >= 3 else [])
+
+        async def fetch() -> list[dict]:
+            merged: dict[str, dict] = {}
+            for term in dict.fromkeys(search_terms):
+                url = f"{_FIVEE_EVENT_SEARCH_URL}?keyword={quote(term)}&limit=20&page=1"
+                data = await self._fetch_5e_json(url)
+                for item in self._parse_5e_event_candidates(data):
+                    merged.setdefault(item["tt_id"], item)
+            scored = []
+            for item in merged.values():
+                score = self._stats_event_score(query, item)
+                if score >= 0.35:
+                    scored.append({**item, "score": score})
+            scored.sort(
+                key=lambda item: (
+                    float(item["score"]),
+                    str(item.get("end_date") or ""),
+                ),
+                reverse=True,
+            )
+            return scored[:6]
+
+        return await self._cached_locked(f"event_stats_search:{query.lower()}", fetch)
+
+    async def current_event_stats_candidate(self) -> dict:
+        events = await self.get_events()
+        if not events:
+            raise HltvError("HLTV 近期赛事列表为空。")
+        now = self._now_local()
+        ongoing = []
+        for item in events:
+            try:
+                start = datetime.strptime(
+                    f"{item.get('start_date')}-{now.year}", "%d-%m-%Y"
+                )
+                end = datetime.strptime(f"{item.get('end_date')}-{now.year}", "%d-%m-%Y")
+            except (TypeError, ValueError):
+                continue
+            if start.date() <= now.date() <= end.date():
+                ongoing.append(item)
+        selected = ongoing[0] if ongoing else events[0]
+        return {
+            "tt_id": f"csgo_tt_{selected['id']}",
+            "title": str(selected.get("title") or ""),
+            "title_zh": "",
+            "start_date": str(selected.get("start_date") or ""),
+            "end_date": str(selected.get("end_date") or ""),
+            "status": "ongoing" if ongoing else "",
+        }
+
+    @staticmethod
+    def _parse_event_player_stats(
+        introduction: dict, stats: dict, tt_id: str, fallback_title: str = ""
+    ) -> dict:
+        intro_data = introduction.get("data") or {}
+        stats_data = stats.get("data") or {}
+        basic = intro_data.get("basic") or {}
+        if not basic:
+            raise HltvError("赛事数据源没有返回基础信息。")
+        teams_by_logo = {
+            str(row.get("team", {}).get("logo") or ""): str(
+                row.get("team", {}).get("name") or "?"
+            )
+            for row in intro_data.get("cur_team_rank") or []
+            if isinstance(row, dict) and isinstance(row.get("team"), dict)
+        }
+        for row in intro_data.get("teams") or []:
+            logo = str(row.get("logo") or "")
+            name = str(row.get("name") or "").strip()
+            if logo and name and logo not in teams_by_logo:
+                teams_by_logo[logo] = name
+        players = []
+        for item in stats_data.get("player_data") or []:
+            player = {
+                "rank": str(item.get("rank") or ""),
+                "nickname": str(item.get("name") or "?"),
+                "team": teams_by_logo.get(str(item.get("team_logo") or ""), "?"),
+                "country": str(item.get("country_name") or ""),
+                "maps": str(item.get("map_count") or ""),
+                "kd": str(item.get("kd") or ""),
+                "kd_diff": str(item.get("kd_diff") or ""),
+                "adr": str(item.get("adr") or ""),
+                "kast": str(item.get("kast") or ""),
+                "rating": str(item.get("rating") or ""),
+            }
+            if player["nickname"] != "?":
+                players.append(player)
+        players.sort(key=lambda item: int(item["rank"]) if item["rank"].isdigit() else 999)
+        return {
+            "event": {
+                "tt_id": str(basic.get("tt_id") or tt_id),
+                "title": str(basic.get("name_en") or fallback_title or "?"),
+                "title_zh": str(basic.get("name_zh") or ""),
+                "start_date": str(basic.get("start_time") or ""),
+                "end_date": str(basic.get("end_time") or ""),
+                "status": str(basic.get("status") or ""),
+            },
+            "players": players,
+        }
+
+    async def get_event_player_stats(self, tt_id: str) -> dict:
+        tt_id = str(tt_id or "").strip()
+        if not re.fullmatch(r"csgo_tt_\d+", tt_id):
+            raise HltvError("赛事数据 ID 无效。")
+
+        async def fetch() -> dict:
+            introduction = await self._fetch_5e_json(
+                f"{_FIVEE_EVENT_DATA_URL}/{tt_id}/introduction"
+            )
+            stats = await self._fetch_5e_json(
+                f"{_FIVEE_EVENT_DATA_URL}/{tt_id}/data?type=1"
+            )
+            return self._parse_event_player_stats(introduction, stats, tt_id)
+
+        return await self._cached_locked(f"event_stats:{tt_id}", fetch)
 
     # ---------------------------------------------------------------- 年度 TOP20
 

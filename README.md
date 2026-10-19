@@ -15,6 +15,7 @@
 | 战队资料 | Valve/HLTV 排名、阵容、教练、Major 冠军、奖杯、近期战绩 |
 | 选手资料 | 当前 Rating、TOP20 排名、Major、冠军与 MVP 荣誉 |
 | 排名与榜单 | Valve VRS 全球/地区排名、HLTV 世界排名、年度 TOP20 |
+| 赛事数据 | 单项赛事选手榜、地图数、K-D、ADR、KAST 与 Rating |
 | 新闻 | 今日新闻、中英双语标题、中文摘要与原文链接 |
 | AstrBot 集成 | `query_hltv` 大模型工具、群聊免 @ 指令、每日赛程推送 |
 
@@ -29,6 +30,10 @@
 | 赛中十人实时战绩 | 逐图 Rating |
 | :---: | :---: |
 | ![赛中十人实时战绩](docs/images/live-detail.webp) | ![逐图 Rating 表格](docs/images/map-rating.webp) |
+
+### 赛事选手数据
+
+![赛事选手数据榜](docs/images/event-stats.webp)
 
 ### 选手详情
 
@@ -72,6 +77,7 @@ pip install -r requirements.txt
 | 查看战队资料 | `/hltv team <名称>` |
 | 查看选手资料 | `/hltv player <昵称>` |
 | 查看年度 TOP20 | `/hltv top20 [年份]` |
+| 查看赛事选手数据榜 | `/hltv stats [赛事] [选手]` |
 | 查看今日新闻 | `/hltv news` |
 
 默认允许在群聊中直接发送 `/hltv ...`，无需 @ 机器人。所有子指令均提供中文别名。
@@ -162,6 +168,9 @@ pip install -r requirements.txt
 | `/hltv player <昵称>` | 选手资料、Rating、TOP20、冠军与 MVP |
 | `/hltv top20 [年份]` | 年度 TOP20 总榜；不填年份时查询上一年 |
 | `/hltv top20 <年份> <名次>` | 指定名次的新闻内容和个人 TOP 图片 |
+| `/hltv stats` | 当前赛事选手数据榜 |
+| `/hltv stats <赛事>` | 指定赛事选手数据榜 |
+| `/hltv stats <赛事> <选手>` | 指定赛事中定位某名选手 |
 
 ### 新闻与推送
 
@@ -193,6 +202,17 @@ CS 职业比赛、赛程、赛果、排名、赛事、战队、选手、新闻�
 - 新年份优先读取 HLTV 官方榜单与图片。
 - 历史年份可使用已收录的 5E 总榜海报；图片无法获取时由插件按同一榜单数据本地渲染。
 
+## 赛事选手数据
+
+`/hltv stats` 会自动选择当前进行中的赛事；`/hltv stats IEM Cologne NiKo`
+会先匹配赛事，再在榜单中高亮 NiKo。只输入选手名时，例如 `/hltv stats donk`，
+会在当前赛事中定位该选手。
+
+榜单按 HLTV 赛事统计口径展示地图数、K-D、K-D 差值、ADR、KAST 和 Rating。
+赛事名支持英文、中文和 `Season 1` / `第1季` 这类常见写法；同名赛事过多时会列出
+候选让用户补全，不会悄悄选错。数据源使用 5E 赛事数据中心与 HLTV 赛事 ID 对齐的
+统计接口，避免逐场抓取带来的误差。
+
 ## 配置
 
 在 AstrBot WebUI 的插件配置页中修改：
@@ -219,6 +239,7 @@ CS 职业比赛、赛程、赛果、排名、赛事、战队、选手、新闻�
 ## 数据与回退
 
 - 比赛、战队、选手、排名、赛事和新闻数据来自 HLTV。
+- 赛事内选手数据来自 5E 赛事数据中心，其赛事 ID 与 HLTV 对齐。
 - 当前地图实时比分与十人战绩来自 HLTV scorebot，不使用估算数据替代。
 - 逐图和完赛 Rating 以 HLTV 页面实际更新时间为准，数据尚未同步时插件会继续等待。
 - HLTV 存在访问频率限制；直连不稳定时可配置 `proxy_list`，并适当增加缓存时间。

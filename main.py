@@ -37,6 +37,7 @@ from .core.client import (
 from .core.knowledge import HltvKnowledgeService, match_team_query
 from .core.renderer import (
     render_events_card,
+    render_event_stats_card,
     render_live_card,
     render_live_detail_card,
     render_matches_card,
@@ -71,6 +72,7 @@ _KNOWN_SUBCOMMANDS = {
     "ranking", "排名", "排行",
     "top20", "年度榜单",
     "events", "赛事",
+    "stats", "数据", "选手数据",
     "team", "战队",
     "player", "选手",
     "rating", "评分",
@@ -463,6 +465,58 @@ class HltvPlugin(Star):
             self._rating_selection_cache.pop((umo, user_id), None)
             return "", []
         return name, [dict(match) for match in matches]
+
+    @staticmethod
+    def _unique_stats_candidate(candidates: list[dict]) -> dict | None:
+        if not candidates:
+            return None
+        best = candidates[0]
+        best_score = float(best.get("score") or 0)
+        if best_score < 0.72:
+            return None
+        if len(candidates) == 1:
+            return best
+        second_score = float(candidates[1].get("score") or 0)
+        if best_score == 1.0 or best_score - second_score >= 0.10:
+            return best
+        return None
+
+    async def _parse_stats_query(self, raw: str) -> tuple[dict, str]:
+        raw = str(raw or "").strip()
+        if not raw:
+            return await self.client.current_event_stats_candidate(), ""
+
+        tokens = raw.split()
+        ambiguous: list[dict] = []
+        last_error: HltvError | None = None
+        for end in range(len(tokens), 0, -1):
+            event_query = " ".join(tokens[:end])
+            try:
+                candidates = await self.client.find_event_stats_candidates(event_query)
+            except HltvError as e:
+                last_error = e
+                continue
+            selected = self._unique_stats_candidate(candidates)
+            if selected is not None:
+                return selected, " ".join(tokens[end:]).strip()
+            if candidates and (
+                not ambiguous
+                or float(candidates[0].get("score") or 0)
+                > float(ambiguous[0].get("score") or 0)
+            ):
+                ambiguous = candidates
+        if ambiguous:
+            listing = "\n".join(
+                f"- {item.get('title')}（{item.get('start_date', '?')} ~ {item.get('end_date', '?')}）"
+                for item in ambiguous[:5]
+            )
+            raise HltvError(
+                f"「{raw}」匹配到多个赛事，请写完整一点：\n{listing}"
+            )
+        if last_error is not None:
+            raise last_error
+        auto = await self.client.current_event_stats_candidate()
+        return auto, raw
 
     def _remember_live_selection(
         self, event: AstrMessageEvent, matches: list[dict]
@@ -982,6 +1036,55 @@ class HltvPlugin(Star):
                 log_name="整场 Rating 卡片",
             )
 
+    @hltv.command("stats", alias={"数据", "选手数据"})
+    async def stats(self, event: AstrMessageEvent, name: str = ""):
+        """赛事内选手数据榜；可只填赛事，也可再定位选手"""
+        raw = self._rest_after(event, {"stats", "数据", "选手数据"}, name)
+        try:
+            selected_event, player_name = await self._parse_stats_query(raw)
+        except HltvError as e:
+            yield event.plain_result(str(e))
+            return
+
+        cache_key = f"event_stats:{selected_event.get('tt_id')}"
+        if tip := self._waiting_tip(event, cache_key):
+            yield tip
+        try:
+            result = await self.client.get_event_player_stats(
+                str(selected_event.get("tt_id"))
+            )
+        except HltvError as e:
+            yield event.plain_result(str(e))
+            return
+
+        players = list(result.get("players") or [])
+        if player_name:
+            needle = player_name.lower()
+            if not any(needle in str(item.get("nickname") or "").lower() for item in players):
+                event_title = (
+                    result.get("event", {}).get("title_zh")
+                    or result.get("event", {}).get("title")
+                    or "当前赛事"
+                )
+                yield event.plain_result(
+                    f"「{player_name}」不在「{event_title}」的选手数据榜中，"
+                    "可能尚未出场或数据还未同步。"
+                )
+                return
+
+        fallback = formatter.format_event_player_stats(
+            result, self.max_items, player_name
+        )
+        yield await self._image_or_text(
+            event,
+            render_event_stats_card,
+            fallback,
+            result,
+            player_name=player_name,
+            max_items=self.max_items,
+            log_name="赛事选手数据卡片",
+        )
+
     @hltv.command("results", alias={"赛果", "结果"})
     async def results(self, event: AstrMessageEvent, days: int = 0):
         """近期赛果，可带天数"""
@@ -1379,6 +1482,8 @@ class HltvPlugin(Star):
             )
         elif sub in ("events", "赛事"):
             handler = self.events(event)
+        elif sub in ("stats", "数据", "选手数据"):
+            handler = self.stats(event)
         elif sub in ("team", "战队"):
             handler = self.team(event)
         elif sub in ("player", "选手"):

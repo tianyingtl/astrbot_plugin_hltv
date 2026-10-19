@@ -22,6 +22,7 @@ sys.modules.setdefault("astrbot.api", astrbot_api)
 
 from core.client import HltvClient, HltvError
 from core.formatter import (
+    format_event_player_stats,
     format_live,
     format_map_rating,
     format_map_started,
@@ -45,6 +46,7 @@ from core.renderer import (
     TOP20_CARD_SIZE,
     WIDE_BACKGROUND,
     _pick_background,
+    render_event_stats_card,
     render_events_card,
     render_live_card,
     render_live_detail_card,
@@ -166,6 +168,133 @@ class NewsTitleTests(unittest.TestCase):
             [item["title"] for item in items],
             ["Today's first story", "Today's second story"],
         )
+
+
+class EventStatsTests(unittest.TestCase):
+    @staticmethod
+    def _result():
+        introduction = {
+            "data": {
+                "basic": {
+                    "tt_id": "csgo_tt_9327",
+                    "name_en": "1win Private Club Season 1",
+                    "name_zh": "1win Private Club 第1季",
+                    "start_time": "2026-09-25 00:00:00",
+                    "end_time": "2026-09-28 23:59:59",
+                    "status": "past",
+                },
+                "cur_team_rank": [
+                    {"team": {"logo": "nip.png", "name": "Ninjas in Pyjamas"}},
+                    {"team": {"logo": "gl.png", "name": "GamerLegion"}},
+                ],
+            }
+        }
+        stats = {
+            "data": {
+                "player_data": [
+                    {
+                        "rank": "2",
+                        "name": "Krimbo",
+                        "team_logo": "nip.png",
+                        "country_name": "德国",
+                        "map_count": "12",
+                        "kd": "1.18",
+                        "kd_diff": "+28",
+                        "adr": "76.0",
+                        "kast": "76.5%",
+                        "rating": "1.22",
+                    },
+                    {
+                        "rank": "1",
+                        "name": "adamb",
+                        "team_logo": "nip.png",
+                        "country_name": "瑞典",
+                        "map_count": "12",
+                        "kd": "1.17",
+                        "kd_diff": "+28",
+                        "adr": "75.2",
+                        "kast": "74.7%",
+                        "rating": "1.23",
+                    },
+                    {
+                        "rank": "12",
+                        "name": "beastik",
+                        "team_logo": "gl.png",
+                        "country_name": "捷克",
+                        "map_count": "10",
+                        "kd": "1.01",
+                        "kd_diff": "+2",
+                        "adr": "73.6",
+                        "kast": "73.4%",
+                        "rating": "1.08",
+                    },
+                ]
+            }
+        }
+        return HltvClient._parse_event_player_stats(
+            introduction, stats, "csgo_tt_9327"
+        )
+
+    def test_parser_maps_teams_and_sorts_official_rank(self):
+        result = self._result()
+        self.assertEqual(
+            [item["nickname"] for item in result["players"]],
+            ["adamb", "Krimbo", "beastik"],
+        )
+        self.assertEqual(result["players"][0]["team"], "Ninjas in Pyjamas")
+        self.assertEqual(result["players"][-1]["team"], "GamerLegion")
+        self.assertEqual(result["event"]["title_zh"], "1win Private Club 第1季")
+
+    def test_event_search_scoring_handles_included_titles(self):
+        candidate = {"title": "1win Private Club Season 1", "title_zh": ""}
+        self.assertEqual(
+            HltvClient._stats_event_score("1win Private Club Season 1", candidate),
+            1.0,
+        )
+        self.assertGreaterEqual(
+            HltvClient._stats_event_score("1win Private Club", candidate),
+            0.82,
+        )
+        chinese = {"title": "1win Private Club 第1季", "title_zh": ""}
+        self.assertEqual(
+            HltvClient._stats_event_score("1win Private Club Season 1", chinese),
+            1.0,
+        )
+
+    def test_text_keeps_selected_player_outside_top_n(self):
+        result = self._result()
+        text = format_event_player_stats(result, 2, "beastik")
+        self.assertIn("▶ #12 beastik", text)
+        self.assertIn("GamerLegion", text)
+
+    def test_card_is_nonblank_and_keeps_background_visible(self):
+        result = self._result()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            red, blue = root / "red.png", root / "blue.png"
+            Image.new("RGB", (1600, 800), (220, 40, 40)).save(red)
+            Image.new("RGB", (1600, 800), (40, 40, 220)).save(blue)
+            red_card = render_event_stats_card(
+                result,
+                player_name="beastik",
+                max_items=2,
+                background_path=red,
+                output_dir=root / "red",
+            )
+            blue_card = render_event_stats_card(
+                result,
+                player_name="beastik",
+                max_items=2,
+                background_path=blue,
+                output_dir=root / "blue",
+            )
+            with Image.open(red_card) as red_image, Image.open(blue_card) as blue_image:
+                flat = Image.new("RGB", red_image.size, red_image.getpixel((0, 0)))
+                self.assertIsNotNone(ImageChops.difference(red_image, flat).getbbox())
+                self.assertNotEqual(
+                    red_image.convert("RGB").getpixel((100, 240)),
+                    blue_image.convert("RGB").getpixel((100, 240)),
+                )
 
 
 class Top20Tests(unittest.IsolatedAsyncioTestCase):

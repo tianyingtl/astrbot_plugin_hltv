@@ -372,6 +372,44 @@ def format_events(events: list[dict], max_items: int) -> str:
     return "\n".join(lines) + _omitted_line(omitted)
 
 
+def format_event_player_stats(
+    result: dict, max_items: int, player_name: str = ""
+) -> str:
+    event = result.get("event") or {}
+    title = str(event.get("title_zh") or event.get("title") or "未知赛事")
+    period = f"{event.get('start_date', '?')} ~ {event.get('end_date', '?')}"
+    players = list(result.get("players") or [])
+    if not players:
+        return f"📊 「{title}」的选手数据暂未同步。\n赛事周期：{period}"
+
+    needle = str(player_name or "").strip().lower()
+    selected = next(
+        (
+            item
+            for item in players
+            if needle in str(item.get("nickname") or "").lower()
+        ),
+        None,
+    )
+    shown, omitted = _clip(players, max_items)
+    if selected is not None and selected not in shown:
+        shown.append(selected)
+        omitted = max(omitted - 1, 0)
+    lines = [f"📊 {title} 选手数据榜", f"赛事周期：{period}"]
+    for item in shown:
+        mark = "▶" if selected is not None and item is selected else " "
+        team = str(item.get("team") or "?")
+        lines.append(
+            f"{mark} #{item.get('rank', '?')} {item.get('nickname', '?')} / {team}\n"
+            f"   地图 {item.get('maps', '?')}  K-D {item.get('kd', '?')} "
+            f"({item.get('kd_diff', '0')})  ADR {item.get('adr', '?')}  "
+            f"KAST {item.get('kast', '?')}  Rating {item.get('rating', '?')}"
+        )
+    if selected is None and needle:
+        lines.append(f"「{player_name}」不在这项赛事的选手数据榜中。")
+    return "\n".join(lines) + _omitted_line(omitted)
+
+
 # ---------------------------------------------------------------- 战队/选手
 
 
@@ -530,6 +568,7 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv ranking hltv — HLTV 自家排名
 /hltv top20 [年份] [名次] — 年度榜单或指定名次新闻（默认上一年）
 /hltv events — 近期赛事
+/hltv stats [赛事] [选手] — 赛事内选手数据榜，可定位某名选手
 /hltv team <名称> — 战队详情图片卡（支持缩写、中文称呼）
 /hltv player <昵称> — 选手生涯荣誉图片卡
 /hltv rating <战队> [比赛序号] [地图序号] — 回看近期比赛逐图/全场 Rating
