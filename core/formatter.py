@@ -5,6 +5,7 @@
 Python 哨兵漏给用户。图片卡由 renderer.py 负责，本文件保留全部查询的文本回退。
 """
 
+import re
 from typing import Any
 
 
@@ -373,7 +374,12 @@ def format_events(events: list[dict], max_items: int) -> str:
 
 
 def format_event_player_stats(
-    result: dict, max_items: int, player_name: str = ""
+    result: dict,
+    max_items: int,
+    player_name: str = "",
+    *,
+    team_name: str = "",
+    reverse: bool = False,
 ) -> str:
     event = result.get("event") or {}
     title = str(event.get("title_zh") or event.get("title") or "未知赛事")
@@ -383,6 +389,7 @@ def format_event_player_stats(
         return f"📊 「{title}」的选手数据暂未同步。\n赛事周期：{period}"
 
     needle = str(player_name or "").strip().lower()
+    team_key = re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(team_name or "").casefold())
     selected = next(
         (
             item
@@ -391,13 +398,36 @@ def format_event_player_stats(
         ),
         None,
     )
-    shown, omitted = _clip(players, max_items)
-    if selected is not None and selected not in shown:
-        shown.append(selected)
-        omitted = max(omitted - 1, 0)
-    lines = [f"📊 {title} 选手数据榜", f"赛事周期：{period}"]
+    limit = max(1, int(max_items or 10))
+    shown = players[-limit:][::-1] if reverse else players[:limit]
+    omitted = max(len(players) - len(shown), 0)
+    if team_key:
+        team_rows = [
+            item
+            for item in players
+            if re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(item.get("team") or "").casefold())
+            == team_key
+        ]
+        for item in team_rows:
+            if item not in shown:
+                shown.append(item)
+                omitted = max(omitted - 1, 0)
+    else:
+        team_rows = []
+        if selected is not None and selected not in shown:
+            shown.append(selected)
+            omitted = max(omitted - 1, 0)
+    view = f" / {team_name} 视角" if team_name else ""
+    mode = (
+        f"显示倒数 {min(limit, len(players))} 名（从最后一名向前）"
+        if reverse
+        else f"显示前 {min(limit, len(players))} 名"
+    )
+    lines = [f"📊 {title}{view} 选手数据榜", f"赛事周期：{period}", mode]
     for item in shown:
-        mark = "▶" if selected is not None and item is selected else " "
+        is_player = selected is not None and item is selected
+        is_team = bool(team_key and item in team_rows)
+        mark = "▶" if is_player or is_team else " "
         team = str(item.get("team") or "?")
         lines.append(
             f"{mark} #{item.get('rank', '?')} {item.get('nickname', '?')} / {team}\n"
@@ -407,6 +437,8 @@ def format_event_player_stats(
         )
     if selected is None and needle:
         lines.append(f"「{player_name}」不在这项赛事的选手数据榜中。")
+    if team_key and not team_rows:
+        lines.append(f"「{team_name}」没有选手进入这项赛事的数据榜。")
     return "\n".join(lines) + _omitted_line(omitted)
 
 
@@ -563,12 +595,15 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv live 取消 — 取消你的直播提醒
 /hltv 防剧透 <数字> — 自动识别当前直播大赛；单位默认分钟，正数增加、负数减少
 /hltv results [天数] — 近期赛果
-/hltv ranking — Valve VRS 排名（默认全球）
+/hltv ranking — Valve VRS 排名（默认全球前 30）
+/hltv ranking [条数] [地区|hltv] — 条数 1-50，顺序可交换
 /hltv ranking asia|europe|americas — 地区 VRS 排名
 /hltv ranking hltv — HLTV 自家排名
 /hltv top20 [年份] [名次] — 年度榜单或指定名次新闻（默认上一年）
 /hltv events — 近期赛事
-/hltv stats [赛事] [选手] — 赛事内选手数据榜，可定位某名选手
+/hltv stats [赛事] [选手] [条数] — 赛事内选手数据榜，可定位某名选手
+/hltv stats <战队> — 查看该队最近赛事并高亮全队
+/hltv stats <战队> 30 倒序 — 查看倒数排名（倒序/倒数/reverse 等价）
 /hltv team <名称> — 战队详情图片卡（支持缩写、中文称呼）
 /hltv player <昵称> — 选手生涯荣誉图片卡
 /hltv rating <战队> [比赛序号] [地图序号] — 回看近期比赛逐图/全场 Rating

@@ -159,18 +159,19 @@ pip install -r requirements.txt
 
 | 指令 | 说明 |
 | --- | --- |
-| `/hltv ranking` | Valve VRS 全球排名 |
-| `/hltv ranking asia` | Valve VRS 亚洲排名 |
-| `/hltv ranking europe` | Valve VRS 欧洲排名 |
-| `/hltv ranking americas` | Valve VRS 美洲排名 |
-| `/hltv ranking hltv` | HLTV 世界排名 |
+| `/hltv ranking` | Valve VRS 全球排名，默认前 30 |
+| `/hltv ranking 30 asia` | Valve VRS 亚洲排名前 30 |
+| `/hltv ranking europe 50` | Valve VRS 欧洲排名前 50 |
+| `/hltv ranking americas` | Valve VRS 美洲排名，默认前 30 |
+| `/hltv ranking hltv 30` | HLTV 世界排名前 30 |
 | `/hltv team <名称>` | 战队排名、阵容、Major、奖杯和近期战绩 |
 | `/hltv player <昵称>` | 选手资料、Rating、TOP20、冠军与 MVP |
 | `/hltv top20 [年份]` | 年度 TOP20 总榜；不填年份时查询上一年 |
 | `/hltv top20 <年份> <名次>` | 指定名次的新闻内容和个人 TOP 图片 |
 | `/hltv stats` | 当前大赛选手数据榜；无进行中大赛时读取最近结束大赛 |
+| `/hltv stats <战队>` | 查看该队最近参加的赛事并高亮全队 |
 | `/hltv stats <赛事>` | 指定赛事选手数据榜 |
-| `/hltv stats <赛事> <选手>` | 指定赛事中定位某名选手 |
+| `/hltv stats <赛事> <选手> [条数]` | 指定赛事中定位某名选手 |
 
 ### 新闻与推送
 
@@ -202,12 +203,41 @@ CS 职业比赛、赛程、赛果、排名、赛事、战队、选手、新闻�
 - 新年份优先读取 HLTV 官方榜单与图片。
 - 历史年份可使用已收录的 5E 总榜海报；图片无法获取时由插件按同一榜单数据本地渲染。
 
+## 排名条数
+
+VRS、HLTV 世界排名默认显示前 30 名，可用 `1-50` 的数字指定条数。
+条数和地区可以交换顺序：
+
+```text
+/hltv ranking
+/hltv ranking 30
+/hltv ranking 30 asia
+/hltv ranking asia 30
+/hltv ranking hltv 50
+```
+
+图片卡片会按条数动态扩展高度；条数超过数据源上限或格式写错时，会返回可复制的用法示例。
+
 ## 赛事选手数据
 
 `/hltv stats` 会自动选择当前进行中的 S 级大赛；没有进行中的 S 级大赛时，
 读取最近结束的 S 级大赛。`/hltv stats IEM Cologne NiKo`
 会先匹配赛事，再在榜单中高亮 NiKo。只输入选手名时，例如 `/hltv stats donk`，
 会在当前赛事中定位该选手。
+
+战队模式不受 S 级限制：`/hltv stats FaZe` 会读取 FaZe 最近一场已开赛比赛所属
+赛事，并在完整数据榜中高亮 FaZe 全队；未进入当前显示区间的该队选手会自动补到
+卡片末尾。该模式支持战队缩写和中文称呼。
+
+赛事选手榜默认显示前 30 名，条数范围 `1-50`。在末尾加 `倒序`、`倒数` 或
+`reverse` 可查看倒数排名，显示顺序从最后一名往前，并保留官方名次：
+
+```text
+/hltv stats 30
+/hltv stats FaZe 30
+/hltv stats IEM Cologne NiKo 30
+/hltv stats FaZe 30 倒序
+```
 
 榜单按 HLTV 赛事统计口径展示地图数、K-D、K-D 差值、ADR、KAST 和 Rating。
 赛事名支持英文、中文和 `Season 1` / `第1季` 这类常见写法；同名赛事过多时会列出
@@ -228,7 +258,7 @@ CS 职业比赛、赛程、赛果、排名、赛事、战队、选手、新闻�
 | `push_time` | `09:00` | 每日推送时间，使用插件时区 |
 | `push_sessions` | 空 | 推送目标会话，通常由 `/hltv sub` 自动维护 |
 | `default_days` | `1` | `matches`、`results` 的默认查询天数 |
-| `max_items` | `10` | 列表类图片和文字最多显示的条数 |
+| `max_items` | `10` | 普通列表最多显示的条数；排名与赛事选手榜另有默认 30 |
 | `free_wake` | 开启 | 允许无需 @ 直接调用 `/hltv` |
 | `send_waiting_tip` | 关闭 | 无缓存时先发送查询提示 |
 | `timezone` | `Asia/Shanghai` | 比赛时间、日期和定时推送所用时区 |

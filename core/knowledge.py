@@ -6,6 +6,9 @@ from collections.abc import Awaitable, Callable
 from . import formatter
 from .client import TOP20_MIN_YEAR, VRS_REGIONS, HltvError, team_query_variants
 
+_RANKING_DEFAULT_ITEMS = 30
+_RANKING_MAX_ITEMS = 50
+
 
 _REGION_CN = {"Asia": "亚洲", "Europe": "欧洲", "Americas": "美洲"}
 
@@ -195,16 +198,35 @@ class HltvKnowledgeService:
         return formatter.format_results(results, days, self.max_items)
 
     async def _query_ranking(self, value: str) -> str:
-        arg = value.casefold()
+        kinds: list[str] = []
+        counts: list[int] = []
+        for token in value.split():
+            if token.isdigit():
+                number = int(token)
+                if 1 <= number <= _RANKING_MAX_ITEMS:
+                    counts.append(number)
+                    continue
+                return (
+                    f"ranking 条数范围为 1-{_RANKING_MAX_ITEMS}，"
+                    f"默认 {_RANKING_DEFAULT_ITEMS}。"
+                )
+            kinds.append(token.casefold())
+        if len(kinds) > 1 or len(counts) > 1:
+            return "ranking 的 query 请使用 hltv、vrs、asia、europe、americas 和一个条数。"
+        arg = kinds[0] if kinds else ""
+        limit = counts[0] if counts else _RANKING_DEFAULT_ITEMS
         if arg in {"hltv", "h"}:
             teams = await self.client.get_top_teams(50)
-            return formatter.format_ranking(teams, self.max_items, "HLTV 战队排名 Top50")
+            return formatter.format_ranking(teams, limit, "HLTV 战队排名 Top50")
         if arg in {"", "v", "vrs", "valve", "global", "全球"}:
             region = None
         else:
             region = VRS_REGIONS.get(arg)
             if region is None:
-                return "ranking 的 query 请使用 hltv、vrs、asia、europe 或 americas。"
+                return (
+                    "ranking 的 query 请使用 hltv、vrs、asia、europe、americas，"
+                    "并可附加 1-50 的条数。"
+                )
         teams = await self.client.get_vrs_ranking(region)
         title = (
             "Valve VRS 排名（全球）"
@@ -212,7 +234,7 @@ class HltvKnowledgeService:
             else f"Valve VRS 排名（{_REGION_CN.get(region, region)}）"
         )
         return formatter.format_ranking(
-            teams, self.max_items, title, show_region=region is None
+            teams, limit, title, show_region=region is None
         )
 
     async def _query_events(self, value: str) -> str:

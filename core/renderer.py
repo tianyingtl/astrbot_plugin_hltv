@@ -29,7 +29,7 @@ DEFAULT_OUTPUT_DIR = plugin_data_dir() / "cards"
 BUNDLED_FONT = ROOT / "assets" / "fonts" / "HLTVCardSans-Regular.otf"
 BUNDLED_FONT_BOLD = ROOT / "assets" / "fonts" / "HLTVCardSans-Bold.otf"
 CARD_SIZE = (1600, 1000)
-PLAYER_CARD_SIZE = (1600, 1400)
+PLAYER_CARD_SIZE = (1600, 1800)
 TOP20_CARD_SIZE = (1600, 1600)
 RATING_CARD_SIZE = (1600, 1000)
 LIVE_DETAIL_CARD_SIZE = (1600, 1000)
@@ -506,7 +506,7 @@ def render_player_card(
     top20 = list(player.get("top20") or [])
     if top20:
         cell_width = 182
-        for index, item in enumerate(top20[:16]):
+        for index, item in enumerate(top20):
             col, row = index % 8, index // 8
             x, y = 72 + col * cell_width, 538 + row * 144
             icon_box = (x + 30, y, x + 124, y + 100)
@@ -528,13 +528,13 @@ def render_player_card(
     else:
         draw.text((72, 554), "暂无入选", font=_font(28, True), fill=MUTED)
 
-    _divider(draw, 842)
+    _divider(draw, 1032)
     championships = list(player.get("championships") or [])[:10]
-    _label(draw, (72, 872), "赛事冠军")
+    _label(draw, (72, 1062), "赛事冠军")
     champ_font = _font(23)
     for index, item in enumerate(championships):
         col, row = index // 5, index % 5
-        x, y = 72 + col * 748, 914 + row * 34
+        x, y = 72 + col * 748, 1104 + row * 34
         name = str(item.get("name") or "?")
         prefix = "MAJOR" if item.get("major") else f"{index + 1:02d}"
         draw.text((x, y + 1), prefix, font=_font(18, True), fill=ACCENT)
@@ -545,17 +545,17 @@ def render_player_card(
             fill=INK,
         )
     if not championships:
-        draw.text((72, 916), "暂无", font=champ_font, fill=MUTED)
+        draw.text((72, 1106), "暂无", font=champ_font, fill=MUTED)
 
-    _divider(draw, 1100)
+    _divider(draw, 1360)
     total_mvps = int(player.get("total_mvps") or 0)
     major_mvps = int(player.get("major_mvps") or 0)
     _label(
         draw,
-        (72, 1130),
+        (72, 1390),
         f"MVP 荣誉  /  {total_mvps} 次  /  Major {major_mvps} 次",
     )
-    mvp_box = (72, 1172, 226, 1340)
+    mvp_box = (72, 1432, 226, 1600)
     if not _paste_icon(canvas, player.get("mvp_icon_path"), mvp_box):
         draw.ellipse(
             mvp_box,
@@ -567,13 +567,13 @@ def render_player_card(
         count_font = _fit_font(draw, count_text, 56, 120, bold=True, minimum=36)
         bounds = draw.textbbox((0, 0), count_text, font=count_font)
         draw.text(
-            (149 - (bounds[2] - bounds[0]) // 2, 1202),
+            (149 - (bounds[2] - bounds[0]) // 2, 1462),
             count_text,
             font=count_font,
             fill=(31, 22, 27, 255),
         )
         draw.text(
-            (118, 1270),
+            (118, 1530),
             "MVP",
             font=_font(24, True),
             fill=(31, 22, 27, 255),
@@ -584,7 +584,7 @@ def render_player_card(
         event_font = _font(22, True)
         for index, event in enumerate(events):
             col, row = index // 4, index % 4
-            x, y = 270 + col * 644, 1174 + row * 43
+            x, y = 270 + col * 644, 1434 + row * 43
             draw.text(
                 (x, y), f"{index + 1:02d}", font=_font(18, True), fill=ACCENT
             )
@@ -595,7 +595,7 @@ def render_player_card(
                 fill=INK,
             )
     else:
-        draw.text((270, 1180), "暂无 MVP 赛事记录", font=_font(24), fill=MUTED)
+        draw.text((270, 1440), "暂无 MVP 赛事记录", font=_font(24), fill=MUTED)
 
     return _save(canvas, output_dir, f"player_{_safe_name(nickname)}.png")
 
@@ -998,13 +998,16 @@ def render_event_stats_card(
     result: dict,
     *,
     player_name: str = "",
-    max_items: int = 10,
+    team_name: str = "",
+    max_items: int = 30,
+    reverse: bool = False,
     background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
     players = list(result.get("players") or [])
     event = result.get("event") or {}
     needle = str(player_name or "").strip().lower()
+    team_key = re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(team_name or "").casefold())
     selected = next(
         (
             item
@@ -1013,14 +1016,24 @@ def render_event_stats_card(
         ),
         None,
     )
-    limit = max(1, int(max_items or 10))
-    shown = players[:limit]
-    if selected is not None and selected not in shown:
+    limit = max(1, int(max_items or 30))
+    shown = players[-limit:][::-1] if reverse else players[:limit]
+    team_rows: list[dict] = []
+    if team_key:
+        team_rows = [
+            item
+            for item in players
+            if re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(item.get("team") or "").casefold())
+            == team_key
+        ]
+        shown.extend(item for item in team_rows if item not in shown)
+    elif selected is not None and selected not in shown:
         shown.append(selected)
 
     row_count = max(len(shown), 1)
-    height = 214 + 58 + EVENT_STATS_ROW_HEIGHT * row_count + 74
-    size = (1600, min(height, 1400))
+    row_height = 64 if row_count <= 15 else 54 if row_count <= 30 else 46
+    height = 214 + 58 + row_height * row_count + 74
+    size = (1600, height)
     selected_background = _pick_background(background_path)
     if not selected_background.is_file():
         raise RenderError(f"Card background does not exist: {selected_background}")
@@ -1045,7 +1058,8 @@ def render_event_stats_card(
     draw.text((30, 68), _ellipsize(draw, title, title_font, 820), font=title_font, fill=RATING_BLUE)
     period = f"{str(event.get('start_date') or '?')[:10]} ~ {str(event.get('end_date') or '?')[:10]}"
     status = str(event.get("status") or "").upper()
-    meta = "  |  ".join(part for part in (period, status) if part)
+    team_label = f"TEAM VIEW / {team_name}" if team_name else ""
+    meta = "  |  ".join(part for part in (period, status, team_label) if part)
     meta_font = _font(23)
     draw.text((1570 - draw.textbbox((0, 0), meta, font=meta_font)[2], 78), meta, font=meta_font, fill=RATING_MUTED)
     draw.line((28, 126, 1572, 126), fill=RATING_LINE, width=2)
@@ -1053,7 +1067,7 @@ def render_event_stats_card(
     edges = (28, 92, 480, 784, 878, 1040, 1170, 1290, 1408, 1572)
     headers = ("#", "PLAYER", "TEAM", "MAPS", "K-D", "DIFF", "ADR", "KAST", "RATING")
     table_top = 166
-    header_height, row_height = 58, EVENT_STATS_ROW_HEIGHT
+    header_height = 58
     table_bottom = table_top + header_height + row_height * row_count
     _alpha_rectangle(
         canvas,
@@ -1072,28 +1086,34 @@ def render_event_stats_card(
     for index in range(row_count):
         top = table_top + header_height + index * row_height
         bottom = top + row_height
-        is_selected = bool(selected is not None and shown[index] is selected)
+        player = shown[index]
+        is_selected = bool(
+            (selected is not None and player is selected)
+            or (team_key and player in team_rows)
+        )
         fill = (42, 108, 163, 62) if is_selected else (
             (219, 225, 231, 92) if index % 2 else (250, 250, 251, 104)
         )
         _alpha_rectangle(canvas, (edges[0], top, edges[-1], bottom), fill)
         draw.line((edges[0], top, edges[-1], top), fill=RATING_LINE, width=1)
-        if index >= len(shown):
-            continue
-        player = shown[index]
+        rank_value = str(player.get("rank") or index + 1)
         _draw_centered(
             draw,
             (edges[0], top, edges[1], bottom),
-            player.get("rank") or index + 1,
+            rank_value,
             _font(24, True),
-            RATING_BLUE if index < 3 else RATING_INK,
+            RATING_BLUE
+            if rank_value.isdigit() and int(rank_value) <= 3
+            else RATING_INK,
         )
         name = str(player.get("nickname") or "?")
-        name_font = _fit_font(draw, name, 27, 360, bold=True, minimum=19)
-        draw.text((edges[1] + 22, top + 17), _ellipsize(draw, name, name_font, 354), font=name_font, fill=RATING_BLUE)
+        name_size = 27 if row_height >= 54 else 25
+        name_font = _fit_font(draw, name, name_size, 360, bold=True, minimum=18)
+        draw.text((edges[1] + 22, top + (17 if row_height >= 54 else 12)), _ellipsize(draw, name, name_font, 354), font=name_font, fill=RATING_BLUE)
         team = str(player.get("team") or "?")
-        team_font = _fit_font(draw, team, 24, 276, minimum=18)
-        draw.text((edges[2] + 18, top + 19), _ellipsize(draw, team, team_font, 270), font=team_font, fill=RATING_MUTED)
+        team_size = 24 if row_height >= 54 else 22
+        team_font = _fit_font(draw, team, team_size, 276, minimum=17)
+        draw.text((edges[2] + 18, top + (19 if row_height >= 54 else 14)), _ellipsize(draw, team, team_font, 270), font=team_font, fill=RATING_MUTED)
         values = (
             player.get("maps"),
             player.get("kd"),
@@ -1127,10 +1147,14 @@ def render_event_stats_card(
         bounds = draw.textbbox((0, 0), message, font=message_font)
         draw.text(((1600 - bounds[2]) // 2, table_top + 120), message, font=message_font, fill=RATING_MUTED)
     draw.line((28, size[1] - 56, 1572, size[1] - 56), fill=RATING_LINE, width=2)
-    footer = "数据来自 5E 赛事数据中心 / HLTV event stats"
+    mode = f"倒数 {min(limit, len(players))} 名" if reverse else f"前 {min(limit, len(players))} 名"
+    footer = f"显示{mode}  /  数据来自 5E 赛事数据中心 / HLTV event stats"
     draw.text((30, size[1] - 42), _ellipsize(draw, footer, _font(20), 1520), font=_font(20), fill=RATING_MUTED)
     identity = event.get("tt_id") or title
-    return _save(canvas, output_dir, f"event_stats_{_safe_name(identity)}.png")
+    suffix = ("_team" if team_key else "") + ("_reverse" if reverse else "")
+    return _save(
+        canvas, output_dir, f"event_stats_{_safe_name(str(identity) + suffix)}.png"
+    )
 
 
 def render_results_card(
@@ -1171,31 +1195,39 @@ def render_ranking_card(
     title: str,
     *,
     show_region: bool = False,
+    max_items: int = 30,
     background_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    canvas, draw = _base_canvas(_pick_background(background_path))
-    _section_header(draw, title, f"展示前 {min(len(teams), 10)} 名")
-    shown = list(teams)[:10]
+    shown = list(teams)[: max(1, int(max_items or 30))]
+    columns = 3
+    rows = max(1, (len(shown) + columns - 1) // columns)
+    size = (1600, 320 + rows * 126 + 38)
+    canvas, draw = _base_canvas(_pick_background(background_path), size)
+    _section_header(draw, title, f"展示前 {len(shown)} 名 / 共 {len(teams)} 队")
     if not shown:
-        draw.text((72, 330), "当前没有排名数据", font=_font(34, True), fill=MUTED)
+        draw.text((72, 336), "当前没有排名数据", font=_font(34, True), fill=MUTED)
+        return _save(canvas, output_dir, f"ranking_{_safe_name(title)}.png")
+
     for index, team in enumerate(shown):
-        col, row = index // 5, index % 5
-        x, y = 72 + col * 748, 292 + row * 132
-        if row:
-            draw.line((x, y - 14, x + 680, y - 14), fill=LINE, width=1)
+        col, row = index % columns, index // columns
+        cell_width, gap = 486, 31
+        x, y = 40 + col * (cell_width + gap), 316 + row * 126
+        _alpha_rectangle(canvas, (x, y, x + cell_width, y + 110), (255, 255, 255, 34))
+        draw.line((x, y + 110, x + cell_width, y + 110), fill=LINE, width=1)
         rank = str(team.get("rank") or index + 1).lstrip("#")
-        rank_font = _fit_font(draw, f"#{rank}", 48, 120, bold=True, minimum=32)
-        draw.text((x, y + 18), f"#{rank}", font=rank_font, fill=ACCENT)
+        rank_font = _fit_font(draw, f"#{rank}", 42, 100, bold=True, minimum=27)
+        draw.text((x + 18, y + 26), f"#{rank}", font=rank_font, fill=ACCENT)
         name = str(team.get("title") or "?")
-        name_font = _fit_font(draw, name, 31, 510, bold=True, minimum=22)
-        draw.text((x + 140, y + 10), _ellipsize(draw, name, name_font, 510), font=name_font, fill=INK)
+        name_font = _fit_font(draw, name, 29, 344, bold=True, minimum=19)
+        draw.text((x + 122, y + 20), _ellipsize(draw, name, name_font, 344), font=name_font, fill=INK)
         points = str(team.get("points") or "-")
         region = str(team.get("region") or "").strip()
         meta = f"{points} 分"
         if show_region and region:
             meta += f"  /  {region}"
-        draw.text((x + 142, y + 59), meta, font=_font(22), fill=MUTED)
+        meta_font = _fit_font(draw, meta, 21, 344, minimum=16)
+        draw.text((x + 122, y + 66), _ellipsize(draw, meta, meta_font, 344), font=meta_font, fill=MUTED)
     return _save(canvas, output_dir, f"ranking_{_safe_name(title)}.png")
 
 

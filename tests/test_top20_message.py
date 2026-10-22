@@ -1414,5 +1414,178 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plugin.live_subscriptions.removed)
 
 
+class RankingStatsCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stats_parser_uses_team_recent_event_id(self):
+        module = _load_main_module()
+
+        class Client:
+            async def find_event_stats_candidates(self, _query):
+                return [
+                    {"title": "Dust2.us 猎鹰大师赛 S7", "score": 0.8},
+                    {"title": "Dust2.us 猎鹰大师赛 S6", "score": 0.8},
+                ]
+
+            async def find_team(self, _name):
+                return {
+                    "title": "FaZe",
+                    "recent": [
+                        {"event": "Future Event", "event_id": "9999", "upcoming": True},
+                        {
+                            "event": "Digital Crusade DraculaN Season 7",
+                            "event_id": "9312",
+                            "upcoming": False,
+                        },
+                    ],
+                }
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+
+        selected, player, team, limit, reverse = await plugin._parse_stats_query(
+            "FaZe 30 倒序"
+        )
+
+        self.assertEqual(selected["tt_id"], "csgo_tt_9312")
+        self.assertEqual(player, "")
+        self.assertEqual(team, "FaZe")
+        self.assertEqual(limit, 30)
+        self.assertTrue(reverse)
+
+    async def test_stats_parser_reports_common_reverse_typo(self):
+        module = _load_main_module()
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+
+        with self.assertRaises(module.HltvError) as caught:
+            plugin._strip_stats_display_options("FaZe 30 倒叙")
+
+        self.assertIn("应为「倒序」", str(caught.exception))
+
+    async def test_stats_parser_keeps_trailing_number_in_event_title(self):
+        module = _load_main_module()
+
+        class Client:
+            async def find_event_stats_candidates(self, query):
+                if query == "Season 2":
+                    return [{"title": "Season 2", "score": 1.0}]
+                return []
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+
+        selected, player, team, limit, reverse = await plugin._parse_stats_query(
+            "Season 2 30"
+        )
+
+        self.assertEqual(selected["title"], "Season 2")
+        self.assertEqual(player, "")
+        self.assertEqual(team, "")
+        self.assertEqual(limit, 30)
+        self.assertFalse(reverse)
+
+    def test_ranking_parser_accepts_count_in_either_position(self):
+        module = _load_main_module()
+
+        self.assertEqual(module.HltvPlugin._parse_ranking_query(""), ("", 30))
+        self.assertEqual(
+            module.HltvPlugin._parse_ranking_query("30 asia"), ("asia", 30)
+        )
+        self.assertEqual(
+            module.HltvPlugin._parse_ranking_query("asia 30"), ("asia", 30)
+        )
+        self.assertEqual(
+            module.HltvPlugin._parse_ranking_query("hltv 50"), ("hltv", 50)
+        )
+
+    def test_ranking_parser_rejects_out_of_range_count(self):
+        module = _load_main_module()
+
+        with self.assertRaises(module.HltvError) as caught:
+            module.HltvPlugin._parse_ranking_query("200")
+
+        self.assertIn("1-50", str(caught.exception))
+
+    async def test_knowledge_ranking_accepts_count_and_region(self):
+        module = _load_main_module()
+
+        class Client:
+            def __init__(self):
+                self.region = None
+
+            async def load_live_scores(self, _matches, _limit):
+                return None
+
+            async def get_vrs_ranking(self, region):
+                self.region = region
+                return [
+                    {"rank": rank, "title": f"Team {rank}", "points": rank}
+                    for rank in range(1, 51)
+                ]
+
+        client = Client()
+        service = module.HltvKnowledgeService(
+            client,
+            max_items=10,
+            default_days=1,
+            live_score_loader=client.load_live_scores,
+        )
+
+        text = await service.query("ranking", "30 asia")
+
+        self.assertEqual(client.region, "Asia")
+        self.assertIn("#30 Team 30", text)
+        self.assertNotIn("#31 Team 31", text)
+
+    async def test_stats_command_matches_data_source_team_alias(self):
+        module = _load_main_module()
+
+        class Client:
+            async def find_event_stats_candidates(self, _query):
+                return []
+
+            async def find_team(self, _name):
+                return {
+                    "title": "Natus Vincere",
+                    "recent": [
+                        {
+                            "event": "Test Event",
+                            "event_id": "123",
+                            "upcoming": False,
+                        }
+                    ],
+                }
+
+            async def get_event_player_stats(self, _tt_id):
+                return {
+                    "event": {"title": "Test Event"},
+                    "players": [
+                        {"rank": "1", "nickname": "player", "team": "NAVI"}
+                    ],
+                }
+
+        class Event:
+            message_str = "/hltv stats NAVI 30"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+            @staticmethod
+            def image_result(path):
+                return ("image", path)
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.client = Client()
+        plugin.send_waiting_tip = False
+
+        with patch.object(
+            module, "render_event_stats_card", return_value=Path("stats.png")
+        ) as render:
+            results = [result async for result in plugin.stats(Event())]
+
+        self.assertEqual(results, [("image", "stats.png")])
+        self.assertEqual(render.call_args.kwargs["team_name"], "NAVI")
+        self.assertEqual(render.call_args.kwargs["max_items"], 30)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1669,7 +1669,20 @@ class HltvClient:
                     event_el = row.select_one("a.event-name") or row.select_one(
                         "a[href^='/events/']"
                     )
+                    event_id = ""
+                    if event_el is None:
+                        header = row.find_previous("tr", class_="event-header-cell")
+                        event_el = (
+                            header.select_one("a[href^='/events/']")
+                            if header is not None
+                            else None
+                        )
                     event = event_el.get_text(" ", strip=True) if event_el else ""
+                    if event_el is not None:
+                        event_match = re.search(
+                            r"/events/(\d+)/", str(event_el.get("href") or "")
+                        )
+                        event_id = event_match.group(1) if event_match else ""
                     numeric_scores = [
                         score if score.isdigit() else "" for score in scores[:2]
                     ]
@@ -1702,6 +1715,7 @@ class HltvClient:
                                 numeric_scores[1] if len(numeric_scores) > 1 else ""
                             ),
                             "event": event,
+                            "event_id": event_id,
                             "upcoming": upcoming,
                         }
                     )

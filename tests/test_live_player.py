@@ -334,6 +334,20 @@ class EventStatsTests(unittest.TestCase):
         self.assertIn("▶ #12 beastik", text)
         self.assertIn("GamerLegion", text)
 
+    def test_event_stats_reverse_keeps_official_rank_and_team_view(self):
+        result = self._result()
+        text = format_event_player_stats(
+            result,
+            2,
+            team_name="Ninjas in Pyjamas",
+            reverse=True,
+        )
+
+        self.assertIn("显示倒数 2 名", text)
+        self.assertIn("  #12 beastik", text)
+        self.assertIn("▶ #2 Krimbo", text)
+        self.assertIn("▶ #1 adamb", text)
+
     def test_card_is_nonblank_and_keeps_background_visible(self):
         result = self._result()
         with tempfile.TemporaryDirectory() as temp:
@@ -361,6 +375,37 @@ class EventStatsTests(unittest.TestCase):
                 self.assertNotEqual(
                     red_image.convert("RGB").getpixel((100, 240)),
                     blue_image.convert("RGB").getpixel((100, 240)),
+                )
+
+    def test_card_extends_for_thirty_stats_rows_and_team_highlight(self):
+        players = [
+            {
+                "rank": str(rank),
+                "nickname": f"Player {rank}",
+                "team": "FaZe" if rank in {12, 34, 39} else f"Team {rank % 8}",
+                "maps": "12",
+                "kd": "1.00",
+                "kd_diff": "0",
+                "adr": "70.0",
+                "kast": "70%",
+                "rating": "1.00",
+            }
+            for rank in range(1, 41)
+        ]
+        result = {"event": {"tt_id": "test", "title": "Test Event"}, "players": players}
+        with tempfile.TemporaryDirectory() as temp:
+            path = render_event_stats_card(
+                result,
+                team_name="FaZe",
+                max_items=30,
+                output_dir=Path(temp),
+            )
+            with Image.open(path) as image:
+                self.assertEqual(image.size, (1600, 1818))
+                self.assertIsNotNone(
+                    ImageChops.difference(
+                        image, Image.new("RGB", image.size, image.getpixel((0, 0)))
+                    ).getbbox()
                 )
 
 
@@ -2497,6 +2542,34 @@ class TeamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(team["recent"][2]["score1"], "")
         self.assertEqual(team["recent"][2]["score2"], "")
 
+    def test_team_history_reads_grouped_event_id(self):
+        page = BeautifulSoup(
+            """
+            <h1 class="profile-team-name">FaZe</h1>
+            <div id="matchesBox"><table>
+              <thead><tr class="event-header-cell">
+                <th><a href="/events/9312/digital-crusade-draculan-season-7">
+                  Digital Crusade DraculaN Season 7</a></th>
+              </tr></thead>
+              <tbody><tr class="team-row">
+                <td><span data-unix="1792613400000"></span></td>
+                <td><div class="team-flex"></div>
+                    <a class="team-name">FaZe</a><a class="team-name">HEROIC</a></td>
+                <td><span class="score">2</span><span class="score">1</span></td>
+                <td><a href="/matches/2399633/heroic-vs-faze-test">Match</a></td>
+              </tr></tbody>
+            </table></div>
+            """,
+            "lxml",
+        )
+
+        team = HltvClient._parse_team_page(page, "FaZe")
+
+        self.assertEqual(
+            team["recent"][0]["event"], "Digital Crusade DraculaN Season 7"
+        )
+        self.assertEqual(team["recent"][0]["event_id"], "9312")
+
 
 class RendererTests(unittest.TestCase):
     def test_live_detail_card_shows_three_maps_and_ten_players(self):
@@ -2781,9 +2854,38 @@ class RendererTests(unittest.TestCase):
             ]
             for path in paths:
                 with Image.open(path) as image:
-                    self.assertEqual(image.size, CARD_SIZE)
+                    expected = (
+                        (1600, 862) if path.name.startswith("ranking_") else CARD_SIZE
+                    )
+                    self.assertEqual(image.size, expected)
                     flat = Image.new("RGB", image.size, image.getpixel((0, 0)))
                     self.assertIsNotNone(ImageChops.difference(image, flat).getbbox())
+
+    def test_ranking_card_extends_for_thirty_teams(self):
+        ranking = [
+            {
+                "rank": index,
+                "title": f"Ranked Team {index}",
+                "points": 1000 - index,
+                "region": "Europe",
+            }
+            for index in range(1, 51)
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            path = render_ranking_card(
+                ranking,
+                "Valve VRS 排名",
+                show_region=True,
+                max_items=30,
+                output_dir=Path(temp),
+            )
+            with Image.open(path) as image:
+                self.assertEqual(image.size, (1600, 1618))
+                self.assertIsNotNone(
+                    ImageChops.difference(
+                        image, Image.new("RGB", image.size, image.getpixel((0, 0)))
+                    ).getbbox()
+                )
 
 
 class TranslatorTests(unittest.TestCase):

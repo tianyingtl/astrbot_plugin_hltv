@@ -27,10 +27,12 @@ from .core.client import (
     MATCHES_RAW_KEY,
     NEWS_KEY,
     RANKING_HLTV_KEY,
+    TEAM_ALIASES,
     TOP20_MIN_YEAR,
     VRS_REGIONS,
     HltvClient,
     HltvError,
+    normalize_team_name,
     results_key,
     vrs_key,
 )
@@ -60,6 +62,11 @@ from .core.storage import migrate_legacy_data
 from .core.translator import Translator
 
 _REGION_CN = {"Asia": "亚洲", "Europe": "欧洲", "Americas": "美洲"}
+_RANKING_DEFAULT_ITEMS = 30
+_RANKING_MAX_ITEMS = 50
+_STATS_DEFAULT_ITEMS = 30
+_STATS_MAX_ITEMS = 50
+_STATS_REVERSE_WORDS = {"倒序", "倒数", "reverse"}
 
 # 全部子指令名与别名。新增子指令时同步维护，
 # 用于拼错提示（未匹配到任何子指令时框架会静默，体验极差）
@@ -343,6 +350,29 @@ class HltvPlugin(Star):
                 match_index, map_index = map_index, 0
         return " ".join(tokens).strip(), match_index, map_index
 
+    @staticmethod
+    def _parse_ranking_query(value: str) -> tuple[str, int]:
+        kinds: list[str] = []
+        counts: list[int] = []
+        for token in str(value or "").split():
+            if token.isdigit():
+                number = int(token)
+                if not 1 <= number <= _RANKING_MAX_ITEMS:
+                    raise HltvError(
+                        f"排名条数范围为 1-{_RANKING_MAX_ITEMS}，"
+                        f"默认 {_RANKING_DEFAULT_ITEMS}。"
+                    )
+                counts.append(number)
+            else:
+                kinds.append(token.casefold())
+        if len(kinds) > 1 or len(counts) > 1:
+            raise HltvError(
+                "用法：/hltv ranking [条数] [地区|hltv]\n"
+                "条数和地区顺序可以交换，例如：/hltv ranking 30 asia "
+                "或 /hltv ranking asia 30。"
+            )
+        return kinds[0] if kinds else "", counts[0] if counts else _RANKING_DEFAULT_ITEMS
+
     async def _collect_rating_matches(self, name: str) -> list[dict]:
         candidates: list[dict] = []
         seen: set[str] = set()
@@ -481,16 +511,115 @@ class HltvPlugin(Star):
             return best
         return None
 
-    async def _parse_stats_query(self, raw: str) -> tuple[dict, str]:
+    @staticmethod
+    def _strip_stats_display_options(value: str) -> tuple[str, int | None, bool]:
+        clean: list[str]
+        reverse = False
+        clean, reverse = HltvPlugin._strip_stats_reverse_words(value)
+        tokens = clean.split()
+        limit = None
+        if tokens and re.fullmatch(r"\d+", tokens[-1]):
+            number = int(tokens[-1])
+            if 1 <= number <= _STATS_MAX_ITEMS:
+                limit = number
+                tokens.pop()
+            elif len(tokens) == 1:
+                raise HltvError(
+                    f"榜单条数范围为 1-{_STATS_MAX_ITEMS}，默认 {_STATS_DEFAULT_ITEMS}。"
+                )
+        return " ".join(tokens), limit, reverse
+
+    @staticmethod
+    def _strip_stats_reverse_words(value: str) -> tuple[str, bool]:
+        clean: list[str] = []
+        reverse = False
+        for token in str(value or "").split():
+            lowered = token.casefold()
+            if lowered in _STATS_REVERSE_WORDS:
+                reverse = True
+                continue
+            if token == "倒叙":
+                raise HltvError("参数「倒叙」写错了，应为「倒序」。例如：/hltv stats FaZe 30 倒序")
+            clean.append(token)
+        return " ".join(clean), reverse
+
+    @staticmethod
+    def _is_exact_team_query(query: str, team: dict) -> bool:
+        normalized = normalize_team_name(query)
+        canonical = TEAM_ALIASES.get(normalized, "")
+        query_names = {normalized, normalize_team_name(canonical)}
+        return bool(normalized and query_names & {normalize_team_name(team.get("title"))})
+
+    async def _team_event_stats_candidate(self, query: str) -> dict | None:
+        try:
+            team = await self.client.find_team(query)
+        except HltvError:
+            return None
+        if not self._is_exact_team_query(query, team):
+            return None
+        match = next(
+            (
+                item
+                for item in team.get("recent") or []
+                if not item.get("upcoming")
+                and item.get("event_id")
+                and str(item.get("event") or "").strip()
+            ),
+            None,
+        )
+        if match is None:
+            raise HltvError(
+                f"「{team.get('title') or query}」最近 5 场里没有已开赛且带赛事信息的比赛，"
+                "可以先等数据同步，或直接用赛事名：/hltv stats <赛事名>。"
+            )
+        return {
+            "tt_id": f"csgo_tt_{match['event_id']}",
+            "title": str(match.get("event") or ""),
+            "team_title": str(team.get("title") or query),
+            "team_names": [
+                name
+                for name in (
+                    str(team.get("title") or ""),
+                    query,
+                    TEAM_ALIASES.get(normalize_team_name(query), ""),
+                )
+                if name
+            ],
+            "title_zh": "",
+            "start_date": "",
+            "end_date": "",
+            "status": "",
+        }
+
+    async def _parse_stats_query(
+        self, raw: str
+    ) -> tuple[dict, str, str, int, bool]:
         raw = str(raw or "").strip()
         if not raw:
-            return await self.client.current_event_stats_candidate(), ""
+            return (
+                await self.client.current_event_stats_candidate(),
+                "",
+                "",
+                _STATS_DEFAULT_ITEMS,
+                False,
+            )
 
-        tokens = raw.split()
+        event_query_base, _ = self._strip_stats_reverse_words(raw)
+        query, explicit_limit, reverse = self._strip_stats_display_options(raw)
+        if not query:
+            return (
+                await self.client.current_event_stats_candidate(),
+                "",
+                "",
+                explicit_limit or _STATS_DEFAULT_ITEMS,
+                reverse,
+            )
+
         ambiguous: list[dict] = []
         last_error: HltvError | None = None
-        for end in range(len(tokens), 0, -1):
-            event_query = " ".join(tokens[:end])
+        query_tokens = event_query_base.split()
+        for end in range(len(query_tokens), 0, -1):
+            event_query = " ".join(query_tokens[:end])
             try:
                 candidates = await self.client.find_event_stats_candidates(event_query)
             except HltvError as e:
@@ -498,13 +627,31 @@ class HltvPlugin(Star):
                 continue
             selected = self._unique_stats_candidate(candidates)
             if selected is not None:
-                return selected, " ".join(tokens[end:]).strip()
+                player_query, player_limit, player_reverse = (
+                    self._strip_stats_display_options(" ".join(query_tokens[end:]))
+                )
+                return (
+                    selected,
+                    player_query,
+                    "",
+                    player_limit or explicit_limit or _STATS_DEFAULT_ITEMS,
+                    reverse or player_reverse,
+                )
             if candidates and (
                 not ambiguous
                 or float(candidates[0].get("score") or 0)
                 > float(ambiguous[0].get("score") or 0)
             ):
                 ambiguous = candidates
+        team_candidate = await self._team_event_stats_candidate(query)
+        if team_candidate is not None:
+            return (
+                team_candidate,
+                "",
+                str(team_candidate.get("team_title") or query),
+                explicit_limit or _STATS_DEFAULT_ITEMS,
+                reverse,
+            )
         if ambiguous:
             listing = "\n".join(
                 f"- {item.get('title')}（{item.get('start_date', '?')} ~ {item.get('end_date', '?')}）"
@@ -515,8 +662,21 @@ class HltvPlugin(Star):
             )
         if last_error is not None:
             raise last_error
+        if len(query.split()) > 1:
+            raise HltvError(
+                "没匹配到唯一赛事或战队。示例：\n"
+                "/hltv stats FaZe\n"
+                "/hltv stats IEM Cologne NiKo\n"
+                "/hltv stats FaZe 30 倒序"
+            )
         auto = await self.client.current_event_stats_candidate()
-        return auto, raw
+        return (
+            auto,
+            query,
+            "",
+            explicit_limit or _STATS_DEFAULT_ITEMS,
+            reverse,
+        )
 
     def _remember_live_selection(
         self, event: AstrMessageEvent, matches: list[dict]
@@ -632,7 +792,7 @@ class HltvPlugin(Star):
 
         Args:
             category(string): 查询类型，使用 live、schedule、results、ranking、events、team、player、news、top20 或 auto；不确定时可省略或传 auto。
-            query(string): 查询条件，无条件时传空字符串。live/schedule/results 可传战队、赛事名称/简称及天数，如“NAVI 7天”或“EWC”；战队或选手资料传名称；ranking 传 hltv、vrs、asia、europe 或 americas；news 传空字符串、新闻序号或英文关键词；top20 传年份及可选名次，如“2025”或“2025 18”。
+            query(string): 查询条件，无条件时传空字符串。live/schedule/results 可传战队、赛事名称/简称及天数，如“NAVI 7天”或“EWC”；战队或选手资料传名称；ranking 传 hltv、vrs、asia、europe、americas 及可选条数，如“30 asia”；news 传空字符串、新闻序号或英文关键词；top20 传年份及可选名次，如“2025”或“2025 18”。
         """
         try:
             service = HltvKnowledgeService(
@@ -1038,10 +1198,12 @@ class HltvPlugin(Star):
 
     @hltv.command("stats", alias={"数据", "选手数据"})
     async def stats(self, event: AstrMessageEvent, name: str = ""):
-        """赛事内选手数据榜；可只填赛事，也可再定位选手"""
+        """赛事内选手数据榜；支持战队视角、条数和倒序"""
         raw = self._rest_after(event, {"stats", "数据", "选手数据"}, name)
         try:
-            selected_event, player_name = await self._parse_stats_query(raw)
+            selected_event, player_name, team_name, limit, reverse = (
+                await self._parse_stats_query(raw)
+            )
         except HltvError as e:
             yield event.plain_result(str(e))
             return
@@ -1071,9 +1233,40 @@ class HltvPlugin(Star):
                     "可能尚未出场或数据还未同步。"
                 )
                 return
+        if team_name:
+            team_candidates = [
+                str(name)
+                for name in selected_event.get("team_names")
+                or [team_name]
+                if str(name).strip()
+            ]
+            matched_team = next(
+                (
+                    candidate
+                    for candidate in team_candidates
+                    if any(
+                        normalize_team_name(item.get("team"))
+                        == normalize_team_name(candidate)
+                        for item in players
+                    )
+                ),
+                "",
+            )
+            if not matched_team:
+                event_title = (
+                    result.get("event", {}).get("title_zh")
+                    or result.get("event", {}).get("title")
+                    or "当前赛事"
+                )
+                yield event.plain_result(
+                    f"「{team_name}」的选手不在「{event_title}」的数据榜中，"
+                    "可能数据源队名未同步，或该队尚未出场。"
+                )
+                return
+            team_name = matched_team
 
         fallback = formatter.format_event_player_stats(
-            result, self.max_items, player_name
+            result, limit, player_name, team_name=team_name, reverse=reverse
         )
         yield await self._image_or_text(
             event,
@@ -1081,7 +1274,9 @@ class HltvPlugin(Star):
             fallback,
             result,
             player_name=player_name,
-            max_items=self.max_items,
+            team_name=team_name,
+            max_items=limit,
+            reverse=reverse,
             log_name="赛事选手数据卡片",
         )
 
@@ -1110,8 +1305,13 @@ class HltvPlugin(Star):
 
     @hltv.command("ranking", alias={"排名", "排行"})
     async def ranking(self, event: AstrMessageEvent, kind: str = ""):
-        """排名：默认 Valve VRS，可加地区或 hltv"""
-        arg = kind.strip().lower()
+        """排名：默认 VRS 前 30，可加地区、hltv 和条数"""
+        raw = self._rest_after(event, {"ranking", "排名", "排行"}, kind)
+        try:
+            arg, limit = self._parse_ranking_query(raw)
+        except HltvError as e:
+            yield event.plain_result(str(e))
+            return
         if arg in ("hltv", "h"):
             use_vrs, region = False, None
             key, title = RANKING_HLTV_KEY, "HLTV 战队排名 Top50"
@@ -1124,10 +1324,12 @@ class HltvPlugin(Star):
             title = f"Valve VRS 排名（{_REGION_CN.get(region, region)}）"
         else:
             yield event.plain_result(
-                "用法：/hltv ranking [地区|hltv]\n"
+                "用法：/hltv ranking [条数] [地区|hltv]\n"
+                "· 条数范围 1-50，默认 30；条数和地区顺序可以交换\n"
                 "· 默认显示 Valve VRS 全球排名（V社积分）\n"
                 "· 地区：asia/亚洲、europe/欧洲、americas/美洲\n"
-                "· hltv：HLTV 自家世界排名"
+                "· hltv：HLTV 自家世界排名\n"
+                "· 示例：/hltv ranking 30 asia、/hltv ranking hltv 50"
             )
             return
         if tip := self._waiting_tip(event, key):
@@ -1141,14 +1343,15 @@ class HltvPlugin(Star):
             yield event.plain_result(str(e))
             return
         show_region = use_vrs and region is None
-        fallback = formatter.format_ranking(data, self.max_items, title, show_region=show_region)
+        fallback = formatter.format_ranking(data, limit, title, show_region=show_region)
         yield await self._image_or_text(
             event,
             render_ranking_card,
             fallback,
-            self._limit_items(data),
+            data[:limit],
             title,
             show_region=show_region,
+            max_items=limit,
             log_name="排名卡片",
         )
 
