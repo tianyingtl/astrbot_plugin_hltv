@@ -401,7 +401,7 @@ class EventStatsTests(unittest.TestCase):
                 output_dir=Path(temp),
             )
             with Image.open(path) as image:
-                self.assertEqual(image.size, (1600, 1818))
+                self.assertEqual(image.size, (1600, 1946))
                 self.assertIsNotNone(
                     ImageChops.difference(
                         image, Image.new("RGB", image.size, image.getpixel((0, 0)))
@@ -431,7 +431,34 @@ class EventStatsTests(unittest.TestCase):
                 output_dir=Path(temp),
             )
             with Image.open(path) as image:
-                self.assertEqual(image.size, (1600, 4946))
+                self.assertEqual(image.size, (1600, 5546))
+
+    def test_stats_card_cache_name_changes_with_limit(self):
+        players = [
+            {
+                "rank": str(rank),
+                "nickname": f"Player {rank}",
+                "team": f"Team {rank % 8}",
+            }
+            for rank in range(1, 101)
+        ]
+        result = {"event": {"tt_id": "test", "title": "Test Event"}, "players": players}
+        with tempfile.TemporaryDirectory() as temp:
+            path_30 = render_event_stats_card(
+                result,
+                max_items=30,
+                background_path=CARD_BASE_BACKGROUND,
+                output_dir=Path(temp),
+            )
+            path_100 = render_event_stats_card(
+                result,
+                max_items=100,
+                background_path=CARD_BASE_BACKGROUND,
+                output_dir=Path(temp),
+            )
+
+        self.assertNotEqual(path_30.name, path_100.name)
+
 
 
 class Top20Tests(unittest.IsolatedAsyncioTestCase):
@@ -2687,8 +2714,8 @@ class RendererTests(unittest.TestCase):
                     blue_image.convert("RGB").getpixel((300, 400)),
                 )
 
-    def test_all_four_user_backgrounds_are_randomized(self):
-        self.assertEqual(len(BACKGROUND_POOL), 4)
+    def test_all_user_backgrounds_are_randomized(self):
+        self.assertEqual(len(BACKGROUND_POOL), 7)
         self.assertTrue(all(path.is_file() for path in BACKGROUND_POOL))
         with patch("core.renderer.random.choice", return_value=CARD_BASE_BACKGROUND) as choose:
             self.assertEqual(_pick_background(None), CARD_BASE_BACKGROUND)

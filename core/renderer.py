@@ -18,11 +18,17 @@ ROOT = Path(__file__).resolve().parent.parent
 WIDE_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_wide.png"
 SMILE_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_smile.jpg"
 PORTRAIT_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_portrait.jpg"
+WIDE_NIGHT_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_wide_night.jpg"
+SMILE_NEON_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_smile_neon.jpg"
+PORTRAIT_DUSK_BACKGROUND = ROOT / "assets" / "backgrounds" / "chiaki_portrait_dusk.jpg"
 CARD_BASE_BACKGROUND = ROOT / "assets" / "card_base.png"
 BACKGROUND_POOL = (
     WIDE_BACKGROUND,
     SMILE_BACKGROUND,
     PORTRAIT_BACKGROUND,
+    WIDE_NIGHT_BACKGROUND,
+    SMILE_NEON_BACKGROUND,
+    PORTRAIT_DUSK_BACKGROUND,
     CARD_BASE_BACKGROUND,
 )
 DEFAULT_OUTPUT_DIR = plugin_data_dir() / "cards"
@@ -1031,7 +1037,15 @@ def render_event_stats_card(
         shown.append(selected)
 
     row_count = max(len(shown), 1)
-    row_height = 64 if row_count <= 15 else 54 if row_count <= 30 else 46
+    row_height = (
+        64
+        if row_count <= 15
+        else 54
+        if row_count <= 30
+        else 50
+        if row_count <= 50
+        else 52
+    )
     height = 214 + 58 + row_height * row_count + 74
     size = (1600, height)
     selected_background = _pick_background(background_path)
@@ -1151,9 +1165,21 @@ def render_event_stats_card(
     footer = f"显示{mode}  /  数据来自 5E 赛事数据中心 / HLTV event stats"
     draw.text((30, size[1] - 42), _ellipsize(draw, footer, _font(20), 1520), font=_font(20), fill=RATING_MUTED)
     identity = event.get("tt_id") or title
-    suffix = ("_team" if team_key else "") + ("_reverse" if reverse else "")
+    result_digest = hashlib.sha1(repr(result).encode("utf-8")).hexdigest()[:8]
+    cache_key = "|".join(
+        (
+            str(identity),
+            player_name,
+            team_name,
+            str(limit),
+            str(reverse),
+            str(row_count),
+            result_digest,
+            selected_background.stem,
+        )
+    )
     return _save(
-        canvas, output_dir, f"event_stats_{_safe_name(str(identity) + suffix)}.png"
+        canvas, output_dir, f"event_stats_{_safe_name(cache_key)}.png"
     )
 
 
