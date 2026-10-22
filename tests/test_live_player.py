@@ -408,6 +408,31 @@ class EventStatsTests(unittest.TestCase):
                     ).getbbox()
                 )
 
+    def test_stats_card_accepts_one_hundred_rows(self):
+        players = [
+            {
+                "rank": str(rank),
+                "nickname": f"Player {rank}",
+                "team": f"Team {rank % 8}",
+                "maps": "12",
+                "kd": "1.00",
+                "kd_diff": "0",
+                "adr": "70.0",
+                "kast": "70%",
+                "rating": "1.00",
+            }
+            for rank in range(1, 101)
+        ]
+        result = {"event": {"tt_id": "test", "title": "Test Event"}, "players": players}
+        with tempfile.TemporaryDirectory() as temp:
+            path = render_event_stats_card(
+                result,
+                max_items=100,
+                output_dir=Path(temp),
+            )
+            with Image.open(path) as image:
+                self.assertEqual(image.size, (1600, 4946))
+
 
 class Top20Tests(unittest.IsolatedAsyncioTestCase):
     @staticmethod

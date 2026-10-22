@@ -601,7 +601,7 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv ranking hltv — HLTV 自家排名
 /hltv top20 [年份] [名次] — 年度榜单或指定名次新闻（默认上一年）
 /hltv events — 近期赛事
-/hltv stats [赛事] [选手] [条数] — 赛事内选手数据榜，可定位某名选手
+/hltv stats [赛事] [选手] [条数] — 选手数据榜，条数 1-100，可定位某名选手
 /hltv stats <战队> — 查看该队最近赛事并高亮全队
 /hltv stats <战队> 30 倒序 — 查看倒数排名（倒序/倒数/reverse 等价）
 /hltv team <名称> — 战队详情图片卡（支持缩写、中文称呼）

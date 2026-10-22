@@ -1504,6 +1504,20 @@ class RankingStatsCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("1-50", str(caught.exception))
 
+    def test_stats_parser_accepts_one_hundred_items(self):
+        module = _load_main_module()
+
+        query, limit, reverse = module.HltvPlugin._strip_stats_display_options(
+            "FaZe 100"
+        )
+
+        self.assertEqual((query, limit, reverse), ("FaZe", 100, False))
+
+        with self.assertRaises(module.HltvError) as caught:
+            module.HltvPlugin._strip_stats_display_options("101")
+
+        self.assertIn("1-100", str(caught.exception))
+
     async def test_knowledge_ranking_accepts_count_and_region(self):
         module = _load_main_module()
 

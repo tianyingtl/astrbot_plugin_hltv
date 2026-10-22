@@ -65,7 +65,7 @@ _REGION_CN = {"Asia": "亚洲", "Europe": "欧洲", "Americas": "美洲"}
 _RANKING_DEFAULT_ITEMS = 30
 _RANKING_MAX_ITEMS = 50
 _STATS_DEFAULT_ITEMS = 30
-_STATS_MAX_ITEMS = 50
+_STATS_MAX_ITEMS = 100
 _STATS_REVERSE_WORDS = {"倒序", "倒数", "reverse"}
 
 # 全部子指令名与别名。新增子指令时同步维护，
