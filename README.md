@@ -82,6 +82,22 @@ pip install -r requirements.txt
 
 默认允许在群聊中直接发送 `/hltv ...`，无需 @ 机器人。所有子指令均提供中文别名。
 
+### 名称检索
+
+战队支持英文缩写、中文称呼及部分旧名称，覆盖热门队与历史战队；
+`team`、`live`、`rating`、`stats` 和 AI 查询共用这份别名表。
+选手支持正式昵称、常用简称、中文俗称及部分旧昵称，可用于 `player` 和赛事数据榜定位。
+
+```text
+/hltv team 红星
+/hltv player 总监
+/hltv stats IEM Cologne 雨神
+```
+
+已收录别名按完整名称识别，不会把主队替换成青训队，也不会将不同俱乐部合并。
+未收录的名称仍可按正式名称搜索；历史队伍和退役选手能否返回资料取决于数据源。
+详见[别名说明](docs/search-aliases.md)。
+
 ## 直播与订阅
 
 ### 查看直播
@@ -165,7 +181,7 @@ pip install -r requirements.txt
 | `/hltv ranking americas` | Valve VRS 美洲排名，默认前 30 |
 | `/hltv ranking hltv 30` | HLTV 世界排名前 30 |
 | `/hltv team <名称>` | 战队排名、阵容、Major、奖杯和近期战绩 |
-| `/hltv player <昵称>` | 选手资料、Rating、TOP20、冠军与 MVP |
+| `/hltv player <昵称或俗称>` | 选手资料、Rating、TOP20、冠军与 MVP |
 | `/hltv top20 [年份]` | 年度 TOP20 总榜；不填年份时查询上一年 |
 | `/hltv top20 <年份> <名次>` | 指定名次的新闻内容和个人 TOP 图片 |
 | `/hltv stats` | 当前大赛选手数据榜；无进行中大赛时读取最近结束大赛 |

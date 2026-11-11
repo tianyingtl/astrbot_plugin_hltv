@@ -21,6 +21,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 
 from .core import formatter
+from .core.aliases import select_player, team_name_matches
 from .core.client import (
     EVENTS_KEY,
     HOME_LIVE_KEY,
@@ -549,7 +550,9 @@ class HltvPlugin(Star):
         normalized = normalize_team_name(query)
         canonical = TEAM_ALIASES.get(normalized, "")
         query_names = {normalized, normalize_team_name(canonical)}
-        return bool(normalized and query_names & {normalize_team_name(team.get("title"))})
+        title = normalize_team_name(team.get("title"))
+        team_names = {title, normalize_team_name(TEAM_ALIASES.get(title, ""))} - {""}
+        return bool(normalized and query_names & team_names)
 
     async def _team_event_stats_candidate(self, query: str) -> dict | None:
         try:
@@ -1222,8 +1225,7 @@ class HltvPlugin(Star):
 
         players = list(result.get("players") or [])
         if player_name:
-            needle = player_name.lower()
-            if not any(needle in str(item.get("nickname") or "").lower() for item in players):
+            if select_player(player_name, players) is None:
                 event_title = (
                     result.get("event", {}).get("title_zh")
                     or result.get("event", {}).get("title")
@@ -1243,12 +1245,11 @@ class HltvPlugin(Star):
             ]
             matched_team = next(
                 (
-                    candidate
-                    for candidate in team_candidates
+                    str(item.get("team"))
+                    for item in players
                     if any(
-                        normalize_team_name(item.get("team"))
-                        == normalize_team_name(candidate)
-                        for item in players
+                        team_name_matches(candidate, item.get("team"))
+                        for candidate in team_candidates
                     )
                 ),
                 "",
@@ -1508,7 +1509,7 @@ class HltvPlugin(Star):
         """选手信息，任意选手"""
         nickname = self._rest_after(event, {"player", "选手"}, nickname)
         if not nickname:
-            yield event.plain_result("用法：/hltv player <选手昵称>，例如 /hltv player donk")
+            yield event.plain_result("用法：/hltv player <选手昵称或俗称>，例如 /hltv player 总监")
             return
         if tip := self._waiting_tip(event):
             yield tip

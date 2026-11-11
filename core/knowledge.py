@@ -4,6 +4,7 @@ import re
 from collections.abc import Awaitable, Callable
 
 from . import formatter
+from .aliases import TEAM_ALIASES, team_name_matches
 from .client import TOP20_MIN_YEAR, VRS_REGIONS, HltvError, team_query_variants
 
 _RANKING_DEFAULT_ITEMS = 30
@@ -53,6 +54,8 @@ def _query_variants(query: str) -> tuple[str, ...]:
 
 
 def _matches_text(query: str, *values: object) -> bool:
+    if _normalize(query) in TEAM_ALIASES:
+        return any(team_name_matches(query, value) for value in values)
     needles = _query_variants(query)
     for value in values:
         haystack = _normalize(value)

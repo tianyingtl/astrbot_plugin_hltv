@@ -10,6 +10,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
+from .aliases import select_player
 from .formatter import news_titles
 from .storage import plugin_data_dir
 
@@ -1012,16 +1013,8 @@ def render_event_stats_card(
 ) -> Path:
     players = list(result.get("players") or [])
     event = result.get("event") or {}
-    needle = str(player_name or "").strip().lower()
     team_key = re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(team_name or "").casefold())
-    selected = next(
-        (
-            item
-            for item in players
-            if needle and needle in str(item.get("nickname") or "").lower()
-        ),
-        None,
-    )
+    selected = select_player(player_name, players)
     limit = max(1, int(max_items or 30))
     shown = players[-limit:][::-1] if reverse else players[:limit]
     team_rows: list[dict] = []

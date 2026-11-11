@@ -37,6 +37,15 @@ from PIL import Image, UnidentifiedImageError
 
 from astrbot.api import logger
 
+from .aliases import (
+    TEAM_ALIASES,
+    normalize_team_name,
+    player_nickname,
+    resolve_player_name,
+    select_player,
+    team_name_matches,
+    team_query_variants,
+)
 from .storage import plugin_data_dir
 
 try:
@@ -182,54 +191,6 @@ VRS_REGIONS = {
     "欧洲": "Europe",
     "美洲": "Americas",
 }
-
-# 常见队名缩写与中文称呼。只做精确别名展开，避免短词误伤其他战队。
-TEAM_ALIASES = {
-    "navi": "Natus Vincere",
-    "fnc": "fnatic",
-    "nip": "Ninjas in Pyjamas",
-    "vit": "Vitality",
-    "蜜蜂": "Vitality",
-    "小蜜蜂": "Vitality",
-    "绿龙": "Spirit",
-    "雪碧": "Spirit",
-    "猎鹰": "Falcons",
-    "a队": "Astralis",
-    "a星": "Astralis",
-    "液体": "Liquid",
-    "老鼠": "MOUZ",
-    "鼠队": "MOUZ",
-    "蒙古": "The MongolZ",
-    "蒙古人": "The MongolZ",
-    "100t": "100 Thieves",
-    "vp": "Virtus.pro",
-    "col": "Complexity",
-    "复杂度": "Complexity",
-    "ef": "Eternal Fire",
-    "永恒之火": "Eternal Fire",
-    "ra": "Rare Atom",
-    "稀有原子": "Rare Atom",
-    "天禄": "TYLOO",
-    "lvg": "Lynn Vision",
-    "林恩愿景": "Lynn Vision",
-    "blg": "Bilibili Gaming",
-    "哔哩哔哩": "Bilibili Gaming",
-    "gl": "GamerLegion",
-    "玩家军团": "GamerLegion",
-    "英勇": "HEROIC",
-    "黑豹": "FURIA",
-}
-
-
-def normalize_team_name(value: Any) -> str:
-    return re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(value).lower())
-
-
-def team_query_variants(value: Any) -> tuple[str, ...]:
-    original = str(value or "").strip()
-    canonical = TEAM_ALIASES.get(normalize_team_name(original), original)
-    return tuple(dict.fromkeys(item for item in (original, canonical) if item))
-
 
 # ------------------------------------------------------------------ 缓存键
 # 指令层用它们探测"结果是否已有缓存"（决定要不要发等待提示），
@@ -1589,14 +1550,7 @@ class HltvClient:
         candidates = [
             t
             for t in teams
-            if any(
-                needle
-                and (
-                    needle in self._normalize_name(t.get("title", ""))
-                    or self._normalize_name(t.get("title", "")) in needle
-                )
-                for needle in needles
-            )
+            if team_name_matches(name, t.get("title", ""))
         ]
         matched = (
             min(
@@ -1617,6 +1571,7 @@ class HltvClient:
                 item
                 for item in ((await self._search(search_term)).get("teams") or [])
                 if isinstance(item, dict) and "id" in item
+                and team_name_matches(name, item.get("name") or item.get("title") or "")
             ]
             if not found:
                 raise HltvError(f"没有找到战队「{name}」。")
@@ -2062,36 +2017,28 @@ class HltvClient:
 
     async def find_player(self, nickname: str) -> dict:
         """查选手：站内搜索优先，被风控时退回选手榜（Top 100）匹配。"""
-        needle = nickname.strip().lower()
-        pid = nick = None
+        search_term = resolve_player_name(nickname)
+        matched = None
         try:
-            found = (await self._search(nickname)).get("players") or []
-            if found and isinstance(found[0], dict) and "id" in found[0]:
-                pid = found[0]["id"]
-                # 实测搜索接口的选手键是驼峰 nickName
-                nick = (
-                    found[0].get("nickName")
-                    or found[0].get("nickname")
-                    or found[0].get("name")
-                    or nickname
-                )
+            found = (await self._search(search_term)).get("players") or []
+            matched = select_player(
+                nickname, [p for p in found if isinstance(p, dict) and p.get("id")]
+            )
         except HltvError as search_err:
             logger.warning(f"[hltv] 搜索接口不可用，退回选手榜匹配: {search_err}")
-        if pid is None:
+        if matched is None:
             try:
                 players = await self._call(
                     "get_top_players", top=100, cache_key="top_players:100"
                 )
             except HltvError:
                 players = []
-            matched = next(
-                (p for p in players if needle in str(p.get("nickname", "")).lower()),
-                None,
+            matched = select_player(
+                nickname, [p for p in players if isinstance(p, dict) and p.get("id")]
             )
             if not matched:
                 raise HltvError(f"没有找到选手「{nickname}」。")
-            pid, nick = matched["id"], matched["nickname"]
-        return await self.get_player_details(pid, str(nick))
+        return await self.get_player_details(matched["id"], player_nickname(matched))
 
     # ---------------------------------------------------------------- 赛果/赛事
 

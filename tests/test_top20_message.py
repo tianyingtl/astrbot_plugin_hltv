@@ -1599,7 +1599,7 @@ class RankingStatsCommandTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         class Event:
-            message_str = "/hltv stats NAVI 30"
+            message_str = "/hltv stats 天生赢家 30"
 
             @staticmethod
             def plain_result(text):
@@ -1621,6 +1621,36 @@ class RankingStatsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [("image", "stats.png")])
         self.assertEqual(render.call_args.kwargs["team_name"], "NAVI")
         self.assertEqual(render.call_args.kwargs["max_items"], 30)
+
+    async def test_stats_command_accepts_player_alias_and_keeps_image_highlight(self):
+        module = _load_main_module()
+
+        class Event:
+            message_str = "/hltv stats Test Event 总监"
+
+            @staticmethod
+            def plain_result(text):
+                return text
+
+            @staticmethod
+            def image_result(path):
+                return ("image", path)
+
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.send_waiting_tip = False
+        plugin.client = types.SimpleNamespace(
+            get_event_player_stats=AsyncMock(return_value={
+                "event": {"title": "Test Event"},
+                "players": [{"rank": 1, "nickname": "Twistzz"}],
+            })
+        )
+        plugin._parse_stats_query = AsyncMock(return_value=(
+            {"tt_id": "123"}, "总监", "", 30, False,
+        ))
+        with patch.object(module, "render_event_stats_card", return_value=Path("stats.png")) as render:
+            results = [result async for result in plugin.stats(Event())]
+        self.assertEqual(results, [("image", "stats.png")])
+        self.assertEqual(render.call_args.kwargs["player_name"], "总监")
 
 
 if __name__ == "__main__":

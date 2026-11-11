@@ -8,6 +8,8 @@ Python 哨兵漏给用户。图片卡由 renderer.py 负责，本文件保留全
 import re
 from typing import Any
 
+from .aliases import select_player
+
 
 def _clip(items: list, max_items: int) -> tuple[list, int]:
     if max_items > 0 and len(items) > max_items:
@@ -390,14 +392,7 @@ def format_event_player_stats(
 
     needle = str(player_name or "").strip().lower()
     team_key = re.sub(r"[^0-9a-z\u3400-\u9fff]", "", str(team_name or "").casefold())
-    selected = next(
-        (
-            item
-            for item in players
-            if needle in str(item.get("nickname") or "").lower()
-        ),
-        None,
-    )
+    selected = select_player(player_name, players)
     limit = max(1, int(max_items or 10))
     shown = players[-limit:][::-1] if reverse else players[:limit]
     omitted = max(len(players) - len(shown), 0)
@@ -605,11 +600,14 @@ HELP_TEXT = """🎮 HLTV 查询插件
 /hltv stats <战队> — 查看该队最近赛事并高亮全队
 /hltv stats <战队> 30 倒序 — 查看倒数排名（倒序/倒数/reverse 等价）
 /hltv team <名称> — 战队详情图片卡（支持缩写、中文称呼）
-/hltv player <昵称> — 选手生涯荣誉图片卡
+/hltv player <昵称或俗称> — 选手生涯荣誉图片卡
 /hltv rating <战队> [比赛序号] [地图序号] — 回看近期比赛逐图/全场 Rating
 /hltv news [序号] — 今日新闻（中英双语标题，带序号看详情）
 /hltv sub — 在本会话订阅每日赛程推送（unsub 退订）
 /hltv help — 显示本帮助
+战队简称、中文称呼通用于 team/live/rating/stats 与 AI 查询，含历史战队。
+选手俗称通用于 player 与 stats 定位，如总监、雨神、大表哥。
+主队和青训队分开检索；未收录的名称请使用正式名称。
 所有子指令均可用中文，如：
 /hltv 今日、/hltv 排名 亚洲、/hltv 战队 spirit、/hltv 新闻 2
 群里直接发 /hltv 指令即可，无需 @ 机器人"""
