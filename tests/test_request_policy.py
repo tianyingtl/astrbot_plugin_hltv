@@ -37,13 +37,14 @@ class RequestPolicyTests(unittest.IsolatedAsyncioTestCase):
             raise response
         return response
 
-    async def test_blocked_site_stops_other_matches_and_commands_until_recovery(self):
+    async def test_background_blocked_site_stops_other_background_requests(self):
         self.responses = [Response(403), Response()]
-        with self.assertRaises(HltvError):
-            await self.client._fetch_page("https://www.hltv.org/matches/1/test")
-        for url in ["matches/1/test", "matches/2/test", "news"] * 5:
+        async with self.client.background_request():
             with self.assertRaises(HltvError):
-                await self.client._fetch_page(f"https://www.hltv.org/{url}")
+                await self.client._fetch_page("https://www.hltv.org/matches/1/test")
+            for url in ["matches/1/test", "matches/2/test", "news"] * 5:
+                with self.assertRaises(HltvError):
+                    await self.client._fetch_page(f"https://www.hltv.org/{url}")
         self.assertEqual(len(self.calls), 1)
         self.assertGreaterEqual(self.client._retry_at - self.clock, 900)
         self.clock = self.client._retry_at + 1
@@ -51,24 +52,41 @@ class RequestPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(self.client._request_failures, 0)
 
+    async def test_manual_query_can_probe_during_background_cooldown(self):
+        self.responses = [Response(403), Response()]
+        async with self.client.background_request():
+            with self.assertRaises(HltvError):
+                await self.client._fetch_page("https://www.hltv.org/matches/1/test")
+        self.assertGreater(self.client._retry_at, self.clock)
+
+        page = await self.client._fetch_page("https://www.hltv.org/")
+
+        self.assertEqual(page.get_text(" ", strip=True), "match data")
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.client._retry_at, 0)
+
     async def test_consecutive_blocks_back_off_and_honor_retry_after(self):
         self.responses = [Response(429, headers={"Retry-After": "7200"}), Response(403)]
-        with self.assertRaises(HltvError):
-            await self.client._fetch_page("https://www.hltv.org/")
+        async with self.client.background_request():
+            with self.assertRaises(HltvError):
+                await self.client._fetch_page("https://www.hltv.org/")
         self.assertGreaterEqual(self.client._retry_at - self.clock, 7200)
         self.clock = self.client._retry_at + 1
-        with self.assertRaises(HltvError):
-            await self.client._fetch_page("https://www.hltv.org/")
+        async with self.client.background_request():
+            with self.assertRaises(HltvError):
+                await self.client._fetch_page("https://www.hltv.org/")
         self.assertGreaterEqual(self.client._retry_at - self.clock, 1800)
 
     async def test_network_failure_and_challenge_page_are_not_success(self):
         self.responses = [asyncio.TimeoutError(), Response(text='<title>Just a moment...</title>')]
-        with self.assertRaises(HltvError):
-            await self.client._fetch_page("https://www.hltv.org/")
+        async with self.client.background_request():
+            with self.assertRaises(HltvError):
+                await self.client._fetch_page("https://www.hltv.org/")
         self.assertGreaterEqual(self.client._retry_at - self.clock, 60)
         self.clock = self.client._retry_at + 1
-        with self.assertRaises(HltvError):
-            await self.client._fetch_page("https://www.hltv.org/")
+        async with self.client.background_request():
+            with self.assertRaises(HltvError):
+                await self.client._fetch_page("https://www.hltv.org/")
         self.assertGreaterEqual(self.client._retry_at - self.clock, 900)
 
     async def test_match_page_is_reused_for_a_minute_even_with_result_cache_disabled(self):
@@ -109,24 +127,27 @@ class RequestPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retry_after_http_date(self):
         self.responses = [Response(429, headers={"Retry-After": "Thu, 01 Jan 1970 02:00:00 GMT"})]
-        with self.assertRaises(HltvError):
-            await self.client._fetch_page("https://www.hltv.org/")
+        async with self.client.background_request():
+            with self.assertRaises(HltvError):
+                await self.client._fetch_page("https://www.hltv.org/")
         self.assertGreaterEqual(self.client._retry_at - self.clock, 7200)
 
     async def test_library_fetch_uses_same_policy(self):
         self.responses = [Response(403)]
-        with self.assertRaises(HltvError):
-            await self.client.get_results(days=1, min_stars=0)
-        with self.assertRaises(HltvError):
-            await self.client.get_events()
+        async with self.client.background_request():
+            with self.assertRaises(HltvError):
+                await self.client.get_results(days=1, min_stars=0)
+            with self.assertRaises(HltvError):
+                await self.client.get_events()
         self.assertEqual(len(self.calls), 1)
 
     async def test_successful_proxy_is_retained_after_retry(self):
         self.client._proxy_list = ["http://first:1", "http://second:2"]
         get = AsyncMock(side_effect=[asyncio.TimeoutError(), Response(), Response()])
         self.client._http_session.get = get
-        with self.assertRaises(HltvError):
-            await self.client._fetch_page("https://www.hltv.org/")
+        async with self.client.background_request():
+            with self.assertRaises(HltvError):
+                await self.client._fetch_page("https://www.hltv.org/")
         self.clock = self.client._retry_at + 1
         await self.client._fetch_page("https://www.hltv.org/")
         self.clock += 5

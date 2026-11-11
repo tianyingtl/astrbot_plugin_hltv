@@ -1861,7 +1861,16 @@ class HltvPlugin(Star):
 
         for (match_id, url), subscribers in grouped.items():
             try:
-                snapshot = await self.client.get_match_snapshot(match_id, url, watch=True)
+                background_request = getattr(self.client, "background_request", None)
+                if callable(background_request):
+                    async with background_request():
+                        snapshot = await self.client.get_match_snapshot(
+                            match_id, url, watch=True
+                        )
+                else:
+                    snapshot = await self.client.get_match_snapshot(
+                        match_id, url, watch=True
+                    )
             except HltvCooldown:
                 # The request layer logs once when entering each cooldown.
                 continue

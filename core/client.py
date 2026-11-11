@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import contextvars
 import difflib
 import hashlib
 import json
@@ -74,6 +75,12 @@ class HltvCooldown(HltvError):
 
 # 锁排队的最长等待时间（秒）
 _QUEUE_TIMEOUT = 30
+
+# 订阅轮询与用户主动查询共用连接，但不共用“等待冷却”门闩。
+# 后台轮询必须遵守退避；主动查询允许做一次真实探测，避免订阅风控把整个插件锁死。
+_BACKGROUND_REQUEST = contextvars.ContextVar(
+    "hltv_background_request", default=False
+)
 
 # 比赛列表缓存上限（秒）：直播状态不能吃默认 5 分钟缓存
 _LIVE_TTL = 60
@@ -287,6 +294,15 @@ class HltvClient:
             hltv._fetch = self._fetch_page
             yield hltv
 
+    @asynccontextmanager
+    async def background_request(self):
+        """标记一次后台请求，使其遵守全站页面冷却。"""
+        token = _BACKGROUND_REQUEST.set(True)
+        try:
+            yield
+        finally:
+            _BACKGROUND_REQUEST.reset(token)
+
     def _pause_requests(
         self, reason: str, *, blocked: bool = False, retry_after: str = ""
     ) -> HltvCooldown:
@@ -316,7 +332,7 @@ class HltvClient:
         if cached is not None:
             return cached
         remaining = self._retry_at - time.monotonic()
-        if remaining > 0:
+        if remaining > 0 and _BACKGROUND_REQUEST.get():
             raise HltvCooldown(remaining)
         wait = self._next_request_at - time.monotonic()
         if wait > 0:
