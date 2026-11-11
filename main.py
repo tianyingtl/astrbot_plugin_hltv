@@ -31,6 +31,7 @@ from .core.client import (
     TOP20_MIN_YEAR,
     VRS_REGIONS,
     HltvClient,
+    HltvCooldown,
     HltvError,
     normalize_team_name,
     results_key,
@@ -1861,6 +1862,9 @@ class HltvPlugin(Star):
         for (match_id, url), subscribers in grouped.items():
             try:
                 snapshot = await self.client.get_match_snapshot(match_id, url, watch=True)
+            except HltvCooldown:
+                # The request layer logs once when entering each cooldown.
+                continue
             except HltvError as e:
                 logger.warning(f"[hltv] 直播提醒查询失败({match_id}): {e}")
                 continue
@@ -1949,5 +1953,6 @@ class HltvPlugin(Star):
             await asyncio.gather(*tasks, return_exceptions=True)
         self._push_task = None
         self._live_watch_task = None
+        await self.client.close()
         self.client.clear_cache()
         logger.info("[hltv] 插件已卸载")

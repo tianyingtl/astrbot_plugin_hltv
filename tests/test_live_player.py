@@ -526,7 +526,9 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
                 return article if "/news/40001/" in url else january
 
         fake_hltv = FakeHltv()
-        with patch("core.client.Hltv", return_value=fake_hltv):
+        with patch("core.client.Hltv", return_value=fake_hltv), patch.object(
+            client, "_fetch_page", new=fake_hltv._fetch
+        ):
             result = await client.get_top20(2023)
 
         self.assertEqual(result["image_path"], expected)
@@ -641,7 +643,10 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
             async def _fetch(self, url):
                 return december if url.endswith("/december") else january
 
-        with patch("core.client.Hltv", return_value=FakeHltv()):
+        fake_hltv = FakeHltv()
+        with patch("core.client.Hltv", return_value=fake_hltv), patch.object(
+            client, "_fetch_page", new=fake_hltv._fetch
+        ):
             players = await client.get_top20_players(2023)
 
         self.assertEqual(len(players), 20)
@@ -683,7 +688,10 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
                     return article
                 return january
 
-        with patch("core.client.Hltv", return_value=FakeHltv()):
+        fake_hltv = FakeHltv()
+        with patch("core.client.Hltv", return_value=fake_hltv), patch.object(
+            client, "_fetch_page", new=fake_hltv._fetch
+        ):
             result = await client.get_top20(2023)
 
         self.assertIsNone(result["image_path"])
@@ -714,7 +722,10 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
             async def _fetch(self, url):
                 return december if url.endswith("/december") else january
 
-        with patch("core.client.Hltv", return_value=FakeHltv()):
+        fake_hltv = FakeHltv()
+        with patch("core.client.Hltv", return_value=fake_hltv), patch.object(
+            client, "_fetch_page", new=fake_hltv._fetch
+        ):
             result = await client.get_top20(2023)
 
         self.assertIsNone(result["image_path"])
@@ -765,7 +776,9 @@ class Top20Tests(unittest.IsolatedAsyncioTestCase):
                 return article if "/news/43505/" in url else january
 
         fake_hltv = FakeHltv()
-        with patch("core.client.Hltv", return_value=fake_hltv):
+        with patch("core.client.Hltv", return_value=fake_hltv), patch.object(
+            client, "_fetch_page", new=fake_hltv._fetch
+        ):
             result = await client.get_top20_player(2025, 18)
 
         self.assertEqual(result["name"], "NiKo")

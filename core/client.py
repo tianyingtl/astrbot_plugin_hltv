@@ -11,22 +11,27 @@
 - 新闻改自建主页解析：保留完整文章链接供详情查看
 - results / events 页选择器实测健在 → 继续用库
 - player 页新增 Top20 / Major / 奖杯信息，且库的旧统计选择器已失效 → 自建解析
-- 传输层统一复用库的 _fetch（重试/代理轮换/Cloudflare 检测）
+- 页面传输统一复用浏览器兼容会话、请求间隔和失败退避；库只负责解析
 """
 
 import asyncio
 import difflib
 import hashlib
 import json
+import math
+import random
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urljoin, urlparse
 
 import aiohttp
+from bs4 import BeautifulSoup
 from PIL import Image, UnidentifiedImageError
 
 from astrbot.api import logger
@@ -37,8 +42,10 @@ try:
     from curl_cffi import CurlError
     from curl_cffi.const import CurlECode, CurlWsFlag
     from curl_cffi.requests import Session as CurlSession
+    from curl_cffi.requests import AsyncSession as CurlAsyncSession
 except (ImportError, OSError):
     CurlSession = None
+    CurlAsyncSession = None
     CurlError = OSError
     CurlECode = None
     CurlWsFlag = None
@@ -56,6 +63,13 @@ except ImportError:
 
 class HltvError(Exception):
     """对上层暴露的统一异常，message 可直接回复给用户。"""
+
+
+class HltvCooldown(HltvError):
+    def __init__(self, seconds: float):
+        super().__init__(
+            f"HLTV 页面查询暂时冷却，约 {math.ceil(seconds)} 秒后重试；订阅仍保留。"
+        )
 
 
 # 锁排队的最长等待时间（秒）
@@ -258,8 +272,99 @@ class HltvClient:
         self._cache: dict[str, tuple[float, float, Any]] = {}
         # HLTV 有 Cloudflare 风控，串行化所有请求以降低触发概率
         self._lock = asyncio.Lock()
+        self._http_session = None
+        self._next_request_at = 0.0
+        self._retry_at = 0.0
+        self._request_failures = 0
+        self._proxy_index = 0
 
     # ---------------------------------------------------------------- 基础设施
+
+    @asynccontextmanager
+    async def _hltv_session(self):
+        async with Hltv(**self._hltv_opts) as hltv:
+            # Include library-owned requests (results/events), not only our parsers.
+            hltv._fetch = self._fetch_page
+            yield hltv
+
+    def _pause_requests(
+        self, reason: str, *, blocked: bool = False, retry_after: str = ""
+    ) -> HltvCooldown:
+        self._request_failures += 1
+        if self._proxy_list:
+            self._proxy_index = (self._proxy_index + 1) % len(self._proxy_list)
+        base, cap = (900, 3600) if blocked else (60, 900)
+        delay = min(base * 2 ** min(self._request_failures - 1, 6), cap)
+        delay = min(delay + random.uniform(0, delay * 0.1), cap)
+        try:
+            server_delay = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                server_delay = parsedate_to_datetime(retry_after).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                server_delay = 0
+        if math.isfinite(server_delay):
+            delay = max(delay, server_delay)
+        self._retry_at = time.monotonic() + delay
+        logger.warning(f"[hltv] {reason}；暂停页面请求 {math.ceil(delay)} 秒，保留订阅")
+        return HltvCooldown(delay)
+
+    async def _fetch_page(self, url: str, delay: float = 0) -> Any:
+        """One page attempt; callers hold _lock. Scorebot has its own transport."""
+        page_key = f"page:{url}"
+        cached = self._cache_get(page_key)
+        if cached is not None:
+            return cached
+        remaining = self._retry_at - time.monotonic()
+        if remaining > 0:
+            raise HltvCooldown(remaining)
+        wait = self._next_request_at - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        if self._http_session is None:
+            if CurlAsyncSession is None:
+                raise HltvError("缺少 curl_cffi，请安装插件依赖后重载。")
+            self._http_session = CurlAsyncSession(
+                impersonate="chrome", timeout=self._timeout, max_clients=1,
+                headers={"referer": _HOME_URL, "accept": "text/html"},
+            )
+        proxy = (
+            self._proxy_list[self._proxy_index]
+            if self._proxy_list else None
+        )
+        try:
+            response = await self._http_session.get(url, proxy=proxy)
+        except (CurlError, asyncio.TimeoutError, OSError) as exc:
+            raise self._pause_requests(f"页面请求失败 ({type(exc).__name__})") from exc
+        finally:
+            self._next_request_at = time.monotonic() + random.uniform(3, 5)
+        if response.status_code in (400, 404, 410):
+            raise HltvError(f"HLTV 页面不存在或请求无效（HTTP {response.status_code}）。")
+        if response.status_code != 200:
+            raise self._pause_requests(
+                f"HLTV HTTP {response.status_code}",
+                blocked=response.status_code in (403, 429),
+                retry_after=response.headers.get("Retry-After", ""),
+            )
+        page = await asyncio.to_thread(BeautifulSoup, response.text, "lxml")
+        title = page.title.get_text(strip=True).lower() if page.title else ""
+        if (
+            title in {"just a moment...", "attention required! | cloudflare"}
+            or page.select_one('#challenge-form, script[src*="/cdn-cgi/challenge-platform/"]')
+        ):
+            raise self._pause_requests("HLTV 返回验证页", blocked=True)
+        if not response.text.strip():
+            raise self._pause_requests("HLTV 返回空页面")
+        self._request_failures = 0
+        self._retry_at = 0.0
+        # The short snapshot cache can refresh scorebot without reloading HTML.
+        if re.match(r"/matches/\d+", urlparse(url).path):
+            self._cache[page_key] = (time.monotonic(), 60, page)
+        return page
+
+    async def close(self) -> None:
+        if self._http_session is not None:
+            await self._http_session.close()
 
     @staticmethod
     def _validate_tz(tz: str) -> str:
@@ -284,8 +389,6 @@ class HltvClient:
         return datetime.now(tzi) if tzi else datetime.now()
 
     def _cache_get(self, key: str) -> Any | None:
-        if self._cache_ttl <= 0:
-            return None
         hit = self._cache.get(key)
         if not hit:
             return None
@@ -353,8 +456,10 @@ class HltvClient:
 
         async def fetch() -> Any:
             try:
-                async with Hltv(**self._hltv_opts) as hltv:
+                async with self._hltv_session() as hltv:
                     return await getattr(hltv, method)(*args, **kwargs)
+            except HltvError:
+                raise
             except Exception as e:
                 logger.error(f"[hltv] 调用 {method} 失败: {e!r}")
                 raise HltvError(
@@ -365,24 +470,9 @@ class HltvClient:
         return await self._cached_locked(cache_key, fetch, ttl=ttl)
 
     async def _fetch_raw(self, url: str) -> Any:
-        """经 hltv-async-api 的传输层抓任意 HLTV 页面，返回 BeautifulSoup。
-
-        依赖库私有方法 _fetch（版本已锁 ~=0.8.3）——它的重试、代理轮换、
-        Cloudflare 检测正是自建 aiohttp 请求缺的东西。仅供各 fetch 闭包
-        内部调用，调用时 self._lock 已被 _cached_locked 持有。
-        """
-        if Hltv is None:
-            raise HltvError(
-                "依赖 hltv-async-api 未安装。请在 WebUI 插件管理中安装依赖后重载插件。"
-            )
+        """在 _cached_locked 内调用，统一走页面限流与浏览器兼容会话。"""
         try:
-            async with Hltv(**self._hltv_opts) as hltv:
-                fetcher = getattr(hltv, "_fetch", None)
-                if fetcher is None:
-                    raise HltvError(
-                        "hltv-async-api 版本不兼容（缺少 _fetch），请安装 0.8.x 版本。"
-                    )
-                page = await fetcher(url)
+            return await self._fetch_page(url)
         except HltvError:
             raise
         except Exception as e:
@@ -391,9 +481,6 @@ class HltvClient:
                 "请求 HLTV 失败，可能是网络问题或触发了 Cloudflare 风控，"
                 "可稍后重试或在插件配置中设置代理。"
             ) from e
-        if page is None:
-            raise HltvError("HLTV 未返回数据（可能被风控拦截）。")
-        return page
 
     # ---------------------------------------------------------------- 站内搜索
 
@@ -1371,10 +1458,9 @@ class HltvClient:
             )
             return snapshot
 
-        ttl = min(float(self._cache_ttl or _LIVE_TTL), 10 if watch else _LIVE_TTL)
-        channel = "watch" if watch else "view"
+        ttl = min(float(self._cache_ttl or _LIVE_TTL), 10)
         return await self._cached_locked(
-            f"match_snapshot:{channel}:{match_id}", fetch, ttl=ttl
+            f"match_snapshot:{match_id or url}", fetch, ttl=ttl
         )
 
     async def get_live_snapshot(self, match: dict) -> dict:
@@ -2703,7 +2789,7 @@ class HltvClient:
                 return page
 
             try:
-                async with Hltv(**self._hltv_opts) as hltv:
+                async with self._hltv_session() as hltv:
                     january = await fetch_page(
                         hltv,
                         f"https://www.hltv.org/news/archive/{year + 1}/january",
@@ -2801,7 +2887,7 @@ class HltvClient:
                     "依赖 hltv-async-api 未安装。请在 WebUI 插件管理中安装依赖后重载插件。"
                 )
             try:
-                async with Hltv(**self._hltv_opts) as hltv:
+                async with self._hltv_session() as hltv:
                     fetcher = getattr(hltv, "_fetch", None)
                     if fetcher is None:
                         raise HltvError(
@@ -2858,7 +2944,7 @@ class HltvClient:
                 return page
 
             try:
-                async with Hltv(**self._hltv_opts) as hltv:
+                async with self._hltv_session() as hltv:
                     january = await fetch_page(
                         hltv,
                         f"https://www.hltv.org/news/archive/{year + 1}/january",

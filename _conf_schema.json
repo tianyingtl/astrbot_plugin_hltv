@@ -19,7 +19,7 @@
   "live_poll_interval": {
     "description": "直播订阅检查间隔（秒）",
     "type": "int",
-    "hint": "通过 /live <序号...> 或 /live <队名> 订阅后，按此间隔检查开图、逐图 Rating 和完赛 Rating。实际限制为 20-300 秒。",
+    "hint": "通过 /live <序号...> 或 /live <队名> 订阅后检查开图和 Rating。范围 20-300 秒；等开图时加快 scorebot 检查，比赛网页至少缓存 60 秒。被拦截后会自动冷却。",
     "default": 45
   },
   "enable_push": {
@@ -77,14 +77,15 @@
     "default": 15
   },
   "max_retries": {
-    "description": "请求失败时的最大重试次数",
+    "description": "旧版重试参数（兼容保留）",
+    "hint": "页面请求现统一采用单次尝试和失败退避，不再按此参数连续重试。",
     "type": "int",
     "default": 3
   },
   "cache_ttl": {
     "description": "查询结果缓存时间（秒）",
     "type": "int",
-    "hint": "同一查询在缓存期内直接返回上次结果，降低被风控概率。比赛列表单独限制在 60 秒内以保证直播状态时效。设为 0 关闭缓存。",
+    "hint": "同一查询优先使用缓存。比赛列表最多缓存 60 秒；同场比赛的手动查询与订阅共享结果。0 关闭普通结果缓存，但保留比赛网页 60 秒的请求保护，不影响 scorebot 刷新。",
     "default": 300
   }
 }

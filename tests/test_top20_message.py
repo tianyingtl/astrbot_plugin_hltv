@@ -1263,6 +1263,28 @@ class LiveCommandTests(unittest.IsolatedAsyncioTestCase):
 
         sleep.assert_awaited_once_with(10)
 
+    async def test_cooldown_keeps_subscriptions_without_repeated_warnings(self):
+        module = _load_main_module()
+        item = {
+            "match_id": "123", "url": "/matches/123/test",
+            "umo": "group:1", "user_id": "42",
+            "created_at": int(module.time()), "awaiting_map_start": True,
+        }
+        store = types.SimpleNamespace(
+            all=lambda: [item], remove=AsyncMock(), update=AsyncMock()
+        )
+        plugin = module.HltvPlugin.__new__(module.HltvPlugin)
+        plugin.live_subscriptions = store
+        plugin.client = types.SimpleNamespace(
+            get_match_snapshot=AsyncMock(side_effect=module.HltvCooldown(900))
+        )
+        with patch.object(module.logger, "warning") as warning:
+            for _ in range(5):
+                self.assertTrue(await plugin._poll_live_subscriptions())
+        warning.assert_not_called()
+        store.remove.assert_not_called()
+        store.update.assert_not_called()
+
     async def test_rating_notices_send_at_and_image_in_one_chain(self):
         module = _load_main_module()
         snapshot = {
